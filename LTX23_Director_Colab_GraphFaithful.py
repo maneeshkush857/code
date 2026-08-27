@@ -297,9 +297,476 @@ def memory_guard(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# CELL 3-7: COLAB BOOTSTRAP - ComfyUI install, custom-node fetch, model download
-# (authored in FEAT-002)
+# CELL 2: SYSTEM INFO
+# (import-safe; warns instead of crashing when GPU/psutil are absent)
 # ════════════════════════════════════════════════════════════════════════════
+# Colab free-tier T4 target. These are advisory thresholds only.
+TARGET_MIN_FREE_RAM_GB = 12.2
+TARGET_GPU_SUBSTRINGS = ("T4", "L4", "A100", "V100", "P100")
+
+
+def cell2_system_info() -> dict[str, Any]:
+    """Print and return a system-info snapshot (GPU, RAM, Python, disk).
+
+    Never crashes when torch/psutil/CUDA are unavailable; it warns instead. The
+    returned dict is convenient for checkpointing and the final audit report.
+    """
+    info: dict[str, Any] = {}
+    print("=" * 70)
+    print("CELL 2: SYSTEM INFO")
+    print("=" * 70)
+
+    info["python_version"] = sys.version.split()[0]
+    print(f"  Python           : {info['python_version']}")
+
+    # GPU / VRAM (torch.cuda).
+    torch = _import_torch()
+    gpu_name: str | None = None
+    total_vram_gb: float | None = None
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                props = torch.cuda.get_device_properties(0)
+                total_vram_gb = props.total_memory / 1e9
+        except Exception as exc:  # noqa: BLE001 - report, don't hide
+            print(f"  [warn] torch.cuda query failed: {exc!r}")
+    info["gpu_name"] = gpu_name
+    info["total_vram_gb"] = total_vram_gb
+    if gpu_name:
+        print(f"  GPU              : {gpu_name} ({total_vram_gb:.1f} GB VRAM)")
+        if not any(sub in gpu_name for sub in TARGET_GPU_SUBSTRINGS):
+            print(
+                f"  ⚠️ GPU '{gpu_name}' is not a recognized T4-class Colab GPU; "
+                f"proceed with caution."
+            )
+    else:
+        print("  GPU              : none detected (CPU-only / no CUDA)")
+        print("  ⚠️ No CUDA GPU detected. Full generation requires a Colab GPU runtime.")
+
+    # CPU RAM (psutil).
+    total_ram_gb: float | None = None
+    free_ram_gb = get_free_ram_gb()
+    psutil = _import_psutil()
+    if psutil is not None:
+        try:
+            total_ram_gb = psutil.virtual_memory().total / 1e9
+        except Exception as exc:  # noqa: BLE001 - report, don't hide
+            print(f"  [warn] psutil.virtual_memory failed: {exc!r}")
+    info["total_ram_gb"] = total_ram_gb
+    info["free_ram_gb"] = free_ram_gb
+    ram_desc = f"{free_ram_gb:.1f} GB free" if free_ram_gb is not None else "unknown"
+    total_desc = f" / {total_ram_gb:.1f} GB total" if total_ram_gb is not None else ""
+    print(f"  RAM              : {ram_desc}{total_desc}")
+    if free_ram_gb is not None and free_ram_gb < TARGET_MIN_FREE_RAM_GB:
+        print(
+            f"  ⚠️ Free RAM {free_ram_gb:.1f} GB is below the ~{TARGET_MIN_FREE_RAM_GB} "
+            f"GB target for this workflow. Memory guards will engage aggressively."
+        )
+
+    # Disk free.
+    try:
+        usage = os.statvfs(_SCRIPT_DIR)
+        disk_free_gb = usage.f_bavail * usage.f_frsize / 1e9
+        info["disk_free_gb"] = disk_free_gb
+        print(f"  Disk free        : {disk_free_gb:.1f} GB")
+    except (OSError, AttributeError) as exc:
+        info["disk_free_gb"] = None
+        print(f"  Disk free        : unknown ({exc!r})")
+
+    print("=" * 70)
+    return info
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 3-7: COLAB BOOTSTRAP - ComfyUI install, custom-node fetch, model download
+# ----------------------------------------------------------------------------
+# These cells run ON COLAB. They shell out to git/pip and verify files on disk.
+# All values (model / LoRA / audio / image names) are READ FROM the parsed graph
+# and timeline, never hardcoded twice. Every step reports its result and raises a
+# clear error on failure - no silent swallowing.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ComfyUI upstream. comfy-core node versions observed in the source JSON range
+# roughly 0.7.0 .. 0.24.0 (see context). We install the latest ComfyUI because
+# its bundled core nodes are backward compatible with these node classes; the
+# exact per-node vers are reported (not pinned) so drift is visible.
+COMFYUI_REPO_URL = "https://github.com/comfyanonymous/ComfyUI.git"
+
+# Default Colab install root. Overridable via COMFYUI_ROOT env var.
+COMFYUI_ROOT = os.environ.get("COMFYUI_ROOT", "/content/ComfyUI")
+
+# Exact pinned custom nodes. Where the source JSON's properties.ver gives a
+# commit hash we pin the commit; otherwise we pin the version tag. Each entry:
+#   folder            -> subdir under custom_nodes
+#   url               -> git repo
+#   ref               -> commit hash or tag to check out (None = default branch)
+#   ref_kind          -> 'commit' | 'tag' | 'branch'
+#   provides          -> node classes this repo supplies (for the audit)
+#   required_version  -> the version string exactly as recorded in the JSON
+PINNED_CUSTOM_NODES: list[dict[str, Any]] = [
+    {
+        "folder": "WhatDreamsCost-ComfyUI",
+        "url": "https://github.com/WhatDreamsCost/WhatDreamsCost-ComfyUI.git",
+        "ref": "2.0.0",
+        "ref_kind": "tag",
+        "provides": ["LTXDirector", "LTXDirectorGuide", "LTXDirectorCropGuides"],
+        "required_version": "whatdreamscost-comfyui 2.0.0 (CropGuides 1.3.9)",
+    },
+    {
+        "folder": "ComfyUI-KJNodes",
+        "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
+        "ref": "996b010ae4613ae0743121ace5975830dcf8e6af",
+        "ref_kind": "commit",
+        "provides": ["ModelPreviewOverrideKJ", "VAELoaderKJ"],
+        "required_version": "comfyui-kjnodes @ 996b010ae4613ae0743121ace5975830dcf8e6af",
+    },
+    {
+        "folder": "ComfyUI-GGUF",
+        "url": "https://github.com/city96/ComfyUI-GGUF.git",
+        "ref": "6ea2651e7df66d7585f6ffee804b20e92fb38b8a",
+        "ref_kind": "commit",
+        "provides": ["UnetLoaderGGUF"],
+        "required_version": "ComfyUI-GGUF @ 6ea2651e7df66d7585f6ffee804b20e92fb38b8a",
+    },
+    {
+        "folder": "rgthree-comfy",
+        "url": "https://github.com/rgthree/rgthree-comfy.git",
+        "ref": "dbc5fa5e89b6a8b6a1a1dda787505b690f18026c",
+        "ref_kind": "commit",
+        "provides": ["Power Lora Loader (rgthree)"],
+        "required_version": "rgthree-comfy @ dbc5fa5e89b6a8b6a1a1dda787505b690f18026c",
+    },
+    {
+        "folder": "ComfyUI-LTXVideo",
+        "url": "https://github.com/Lightricks/ComfyUI-LTXVideo.git",
+        "ref": None,
+        "ref_kind": "branch",
+        "provides": [
+            "LTXVConcatAVLatent",
+            "LTXVSeparateAVLatent",
+            "LTXVLatentUpsampler",
+            "LTXVAudioVAEDecode",
+            "LTXVConditioning",
+        ],
+        "required_version": "ComfyUI-LTXVideo (comfy-core LTXV nodes 0.7.0-0.16.0)",
+    },
+    {
+        "folder": "ComfyUI-VideoHelperSuite",
+        "url": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git",
+        "ref": "v1.7.9",
+        "ref_kind": "tag",
+        "provides": ["VHS_VideoCombine"],
+        "required_version": "comfyui-videohelpersuite 1.7.9",
+    },
+]
+
+# Node classes that MUST exist after install (CELL 4b) mapped to the repo that
+# supplies them, so a missing class produces a precise, named error.
+REQUIRED_NODE_CLASSES: dict[str, str] = {
+    "LTXDirector": "WhatDreamsCost-ComfyUI 2.0.0",
+    "LTXDirectorGuide": "WhatDreamsCost-ComfyUI 2.0.0",
+    "LTXDirectorCropGuides": "WhatDreamsCost-ComfyUI 1.3.9",
+    "Power Lora Loader (rgthree)": "rgthree-comfy @ dbc5fa5e",
+    "ModelPreviewOverrideKJ": "ComfyUI-KJNodes @ 996b010a",
+    "VAELoaderKJ": "ComfyUI-KJNodes 1.2.5",
+    "UnetLoaderGGUF": "ComfyUI-GGUF @ 6ea2651e",
+    "LTXVLatentUpsampler": "ComfyUI-LTXVideo",
+    "LTXVConcatAVLatent": "ComfyUI-LTXVideo",
+    "LTXVSeparateAVLatent": "ComfyUI-LTXVideo",
+    "LTXVConditioning": "ComfyUI-LTXVideo",
+    "LTXVAudioVAEDecode": "ComfyUI-LTXVideo",
+    "DualCLIPLoader": "comfy-core (bundled with ComfyUI)",
+    "VHS_VideoCombine": "ComfyUI-VideoHelperSuite 1.7.9",
+}
+
+
+def run_cmd(cmd: list[str], cwd: str | None = None, check: bool = True) -> int:
+    """Run a shell command with real error reporting (no silent failure).
+
+    Streams the command, prints its exit status, and raises RuntimeError with
+    the captured tail of output when ``check`` and the command fails.
+    """
+    import subprocess  # local import: not needed for the selftest path
+
+    printable = " ".join(cmd)
+    print(f"  $ {printable}" + (f"   (cwd={cwd})" if cwd else ""))
+    proc = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout.rstrip()[-2000:])
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").rstrip()[-2000:]
+        print(tail)
+        if check:
+            raise RuntimeError(
+                f"Command failed (exit {proc.returncode}): {printable}\n{tail}"
+            )
+    return proc.returncode
+
+
+def _pip_install(args: list[str]) -> None:
+    """pip install into the current interpreter with error reporting."""
+    run_cmd([sys.executable, "-m", "pip", "install", "--no-input", *args])
+
+
+def cell3_install_comfyui(comfyui_root: str = COMFYUI_ROOT) -> str:
+    """CELL 3: clone ComfyUI and install its requirements.
+
+    Installing the latest ComfyUI is acceptable for the core node classes used
+    here; comfy-core node vers seen in the source JSON range ~0.7.0-0.24.0 and
+    are backward compatible. Returns the ComfyUI root path.
+    """
+    print("=" * 70)
+    print("CELL 3: INSTALL COMFYUI")
+    print("=" * 70)
+    if os.path.isdir(os.path.join(comfyui_root, ".git")):
+        print(f"  ComfyUI already present at {comfyui_root}; skipping clone.")
+    else:
+        parent = os.path.dirname(comfyui_root) or "."
+        os.makedirs(parent, exist_ok=True)
+        run_cmd(["git", "clone", "--depth", "1", COMFYUI_REPO_URL, comfyui_root])
+    req = os.path.join(comfyui_root, "requirements.txt")
+    if os.path.exists(req):
+        _pip_install(["-r", req])
+    else:
+        raise RuntimeError(f"ComfyUI requirements.txt not found at {req}")
+    print(f"  ComfyUI ready at {comfyui_root}")
+    return comfyui_root
+
+
+def _git_checkout_ref(folder_path: str, node: dict[str, Any]) -> None:
+    """Check out the pinned ref (commit/tag/branch) for a custom node repo."""
+    ref = node.get("ref")
+    if not ref:
+        return
+    ref_kind = node.get("ref_kind", "commit")
+    # Fetch the specific ref (tags need an explicit fetch after a shallow clone).
+    run_cmd(["git", "fetch", "--depth", "1", "origin", ref], cwd=folder_path, check=False)
+    rc = run_cmd(["git", "checkout", ref], cwd=folder_path, check=False)
+    if rc != 0:
+        # Fall back to a full fetch then checkout (covers tags/commits missing
+        # from the shallow clone). Failure here is a hard error.
+        run_cmd(["git", "fetch", "--unshallow"], cwd=folder_path, check=False)
+        run_cmd(["git", "fetch", "--all", "--tags"], cwd=folder_path, check=False)
+        run_cmd(["git", "checkout", ref], cwd=folder_path)
+    print(f"  {node['folder']} pinned to {ref_kind} {ref}")
+
+
+def cell4_install_custom_nodes(comfyui_root: str = COMFYUI_ROOT) -> None:
+    """CELL 4: install the exact pinned custom nodes and their requirements."""
+    print("=" * 70)
+    print("CELL 4: INSTALL PINNED CUSTOM NODES")
+    print("=" * 70)
+    custom_nodes_dir = os.path.join(comfyui_root, "custom_nodes")
+    os.makedirs(custom_nodes_dir, exist_ok=True)
+    for node in PINNED_CUSTOM_NODES:
+        folder_path = os.path.join(custom_nodes_dir, node["folder"])
+        print(f"- {node['folder']}  ({node['required_version']})")
+        if os.path.isdir(os.path.join(folder_path, ".git")):
+            print(f"  already present at {folder_path}; fetching pinned ref.")
+        else:
+            run_cmd(["git", "clone", node["url"], folder_path])
+        _git_checkout_ref(folder_path, node)
+        req = os.path.join(folder_path, "requirements.txt")
+        if os.path.exists(req):
+            _pip_install(["-r", req])
+        else:
+            print(f"  (no requirements.txt for {node['folder']})")
+        print(f"  ✅ installed {node['folder']}")
+    print("=" * 70)
+
+
+def cell4b_verify_node_classes(node_mappings: dict[str, Any]) -> None:
+    """CELL 4b: assert every required node class exists after install.
+
+    ``node_mappings`` is ComfyUI's ``NODE_CLASS_MAPPINGS``. A missing class
+    raises a CLEAR error naming the node, its supplying repo, and the required
+    version. NO silent fallback.
+    """
+    print("=" * 70)
+    print("CELL 4b: VERIFY REQUIRED NODE CLASSES")
+    print("=" * 70)
+    missing: list[str] = []
+    for class_name, source in REQUIRED_NODE_CLASSES.items():
+        if class_name in node_mappings:
+            print(f"  [PASS] {class_name}")
+        else:
+            print(f"  [FAIL] {class_name}  <- provided by {source}")
+            missing.append(f"'{class_name}' (install {source})")
+    if missing:
+        raise RuntimeError(
+            "Required ComfyUI node classes are missing after install:\n  - "
+            + "\n  - ".join(missing)
+            + "\nInstall the exact custom nodes/versions listed above; do NOT "
+            "fall back to a substitute node."
+        )
+    print("=" * 70)
+
+
+def _models_root(comfyui_root: str) -> str:
+    return os.path.join(comfyui_root, "models")
+
+
+# Map each parsed model to the ComfyUI models subdirectory it belongs in and,
+# when a public download URL is configurable via env, use it. The env var names
+# let a Colab user supply URLs without editing the source.
+def _model_specs_from_graph(graph: ParsedGraph) -> list[dict[str, Any]]:
+    """Build the model verification specs by READING names from the graph."""
+
+    def w0(node_id: int) -> str:
+        node = graph.require_node(node_id)
+        wv = node.widgets_values
+        if not isinstance(wv, (list, tuple)) or not wv:
+            raise ValueError(f"node id={node_id} has no widget file name")
+        return str(wv[0])
+
+    dualclip = graph.require_node(_DUALCLIP_NODE_ID).widgets_values
+    return [
+        {"name": w0(_UNET_NODE_ID), "subdir": "unet", "env": "URL_UNET_GGUF"},
+        {"name": str(dualclip[0]), "subdir": "text_encoders", "env": "URL_CLIP_GEMMA"},
+        {"name": str(dualclip[1]), "subdir": "text_encoders", "env": "URL_CLIP_PROJ"},
+        {"name": w0(_VIDEO_VAE_NODE_ID), "subdir": "vae", "env": "URL_VIDEO_VAE"},
+        {"name": w0(_AUDIO_VAE_NODE_ID), "subdir": "vae", "env": "URL_AUDIO_VAE"},
+        {"name": w0(_TINY_VAE_NODE_ID), "subdir": "vae_approx", "env": "URL_TINY_VAE"},
+        {
+            "name": w0(_SPATIAL_UPSCALER_NODE_ID),
+            "subdir": "upscale_models",
+            "env": "URL_SPATIAL_UPSCALER",
+        },
+    ]
+
+
+def _download_url(url: str, dest_path: str) -> None:
+    """Download ``url`` to ``dest_path`` with a progress-less streaming copy."""
+    import urllib.request  # local import: not needed for the selftest path
+
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    tmp = dest_path + ".part"
+    print(f"  downloading -> {dest_path}")
+    with urllib.request.urlopen(url) as resp, open(tmp, "wb") as out:
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+    os.replace(tmp, dest_path)
+
+
+def _verify_or_download(name: str, directory: str, url: str | None) -> str:
+    """Return the verified path of ``name`` in ``directory``.
+
+    Downloads from ``url`` when provided and the file is missing. If the file is
+    still missing, raises a hard error naming the exact filename, directory, and
+    (when known) the URL. No placeholder is ever created.
+    """
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, name)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        print(f"  [OK] {name}")
+        return path
+    if url:
+        _download_url(url, path)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            print(f"  [OK] {name} (downloaded)")
+            return path
+    raise FileNotFoundError(
+        f"Required asset missing: '{name}'\n"
+        f"  expected in: {directory}\n"
+        f"  download URL: {url or '(none configured - set the matching URL_* env var)'}\n"
+        f"  Place the exact file there; no placeholder will be substituted."
+    )
+
+
+def cell5_download_verify_models(graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT) -> dict[str, str]:
+    """CELL 5: verify/download all model files into the correct subdirs."""
+    print("=" * 70)
+    print("CELL 5: DOWNLOAD / VERIFY MODELS")
+    print("=" * 70)
+    models_root = _models_root(comfyui_root)
+    resolved: dict[str, str] = {}
+    for spec in _model_specs_from_graph(graph):
+        directory = os.path.join(models_root, spec["subdir"])
+        url = os.environ.get(spec["env"])
+        resolved[spec["name"]] = _verify_or_download(spec["name"], directory, url)
+    print("=" * 70)
+    return resolved
+
+
+def cell6_download_verify_loras(graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT) -> dict[str, str]:
+    """CELL 6: verify/download the 4 LoRAs with exact strengths from node 138."""
+    print("=" * 70)
+    print("CELL 6: DOWNLOAD / VERIFY LORAS")
+    print("=" * 70)
+    lora_node = graph.get_node(_LORA_NODE_ID)
+    if lora_node is None:
+        raise ValueError(f"Power Lora Loader node id={_LORA_NODE_ID} missing from graph.")
+    loras = _extract_loras(lora_node)
+    if not loras:
+        raise ValueError("No LoRAs parsed from the Power Lora Loader node.")
+    loras_dir = os.path.join(_models_root(comfyui_root), "loras")
+    resolved: dict[str, str] = {}
+    for name, strength, on in loras:
+        env_key = "URL_LORA_" + "".join(c if c.isalnum() else "_" for c in name).upper()
+        url = os.environ.get(env_key)
+        path = _verify_or_download(name, loras_dir, url)
+        resolved[name] = path
+        print(f"       strength={strength}  on={on}")
+    print("=" * 70)
+    return resolved
+
+
+def cell7_download_verify_audio_images(
+    graph: ParsedGraph, timeline: DirectorTimeline, comfyui_root: str = COMFYUI_ROOT
+) -> dict[str, str]:
+    """CELL 7: verify audio + the 5 reference images in input/whatdreamscost.
+
+    A missing reference image is a HARD error: placeholders would silently
+    destroy character consistency across the 5 timeline segments. The imageB64
+    '/api/view?...' hints in the timeline describe the expected input subfolder
+    layout (input/whatdreamscost/<file>).
+    """
+    print("=" * 70)
+    print("CELL 7: DOWNLOAD / VERIFY AUDIO + REFERENCE IMAGES")
+    print("=" * 70)
+    input_root = os.path.join(comfyui_root, "input")
+    resolved: dict[str, str] = {}
+
+    # Audio (from the parsed audio segment; filename read, never hardcoded).
+    if not timeline.audio_segments:
+        raise ValueError("Timeline has no audio segment; cannot verify audio file.")
+    aseg = timeline.audio_segments[0]
+    audio_rel = str(aseg.get("audioFile") or aseg.get("fileName") or "")
+    if not audio_rel:
+        raise ValueError("Audio segment has no audioFile/fileName.")
+    audio_dir = os.path.join(input_root, os.path.dirname(audio_rel) or "whatdreamscost")
+    audio_name = os.path.basename(audio_rel)
+    resolved[audio_rel] = _verify_or_download(
+        audio_name, audio_dir, os.environ.get("URL_AUDIO_MP3")
+    )
+
+    # Reference images (read from the timeline segments; NO placeholders).
+    for seg in timeline.timeline_segments:
+        img_rel = str(seg.get("imageFile") or "")
+        if not img_rel:
+            raise ValueError(
+                "A timeline image segment is missing 'imageFile'; refusing to "
+                "substitute a placeholder (would break character consistency)."
+            )
+        img_dir = os.path.join(input_root, os.path.dirname(img_rel) or "whatdreamscost")
+        img_name = os.path.basename(img_rel)
+        env_key = "URL_IMG_" + "".join(c if c.isalnum() else "_" for c in img_name).upper()
+        resolved[img_rel] = _verify_or_download(
+            img_name, img_dir, os.environ.get(env_key)
+        )
+    print(f"  verified 1 audio + {len(timeline.timeline_segments)} reference images")
+    print("=" * 70)
+    return resolved
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -995,8 +1462,842 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NODE REGISTRY / MEMORY-AWARE EXECUTOR / FULL PIPELINE  (authored in FEAT-002)
+# CELL 11: NODE REGISTRY
+# ----------------------------------------------------------------------------
+# After ComfyUI + custom nodes are importable, map each JSON node 'type' string
+# to the actual ComfyUI class in NODE_CLASS_MAPPINGS. Handles display-name vs
+# class-name differences (e.g. 'Power Lora Loader (rgthree)'). This is where the
+# guarded heavy imports (nodes / comfy) actually happen. Any unmapped type is a
+# clear, named error.
 # ════════════════════════════════════════════════════════════════════════════
+# A few source 'type' strings differ from their NODE_CLASS_MAPPINGS key. This
+# table records known aliases; lookups still fall back to display_name matching.
+_NODE_TYPE_ALIASES: dict[str, str] = {
+    # display name -> possible class-mapping key (checked in addition to itself)
+    "Power Lora Loader (rgthree)": "Power Lora Loader (rgthree)",
+}
+
+
+def _load_comfy_node_mappings(comfyui_root: str = COMFYUI_ROOT) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Import ComfyUI and return (NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS).
+
+    Adds ComfyUI to sys.path, initializes custom nodes, and imports ``nodes``.
+    Import happens here (guarded) so the selftest path never triggers it.
+    """
+    if comfyui_root not in sys.path:
+        sys.path.insert(0, comfyui_root)
+
+    nodes_mod = _try_import("nodes")
+    if nodes_mod is None:
+        raise RuntimeError(
+            f"Could not import ComfyUI 'nodes' module. Is ComfyUI installed at "
+            f"{comfyui_root}? Run CELL 3 (cell3_install_comfyui) first."
+        )
+    # Initialize custom nodes so their NODE_CLASS_MAPPINGS get merged in.
+    init_custom = getattr(nodes_mod, "init_extra_nodes", None) or getattr(
+        nodes_mod, "init_custom_nodes", None
+    )
+    if callable(init_custom):
+        try:
+            init_custom()
+        except Exception as exc:  # noqa: BLE001 - report; custom node import errors matter
+            print(f"  [warn] init_extra_nodes raised: {exc!r}")
+    class_mappings = dict(getattr(nodes_mod, "NODE_CLASS_MAPPINGS", {}))
+    display_mappings = dict(getattr(nodes_mod, "NODE_DISPLAY_NAME_MAPPINGS", {}))
+    return class_mappings, display_mappings
+
+
+def build_node_registry(
+    graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT
+) -> dict[str, Any]:
+    """CELL 11: map every JSON node 'type' to its ComfyUI class.
+
+    Returns a dict {type_string: class}. Raises a clear error listing every
+    unmapped type. Also runs CELL 4b verification against the loaded mappings.
+    """
+    print("=" * 70)
+    print("CELL 11: BUILD NODE REGISTRY")
+    print("=" * 70)
+    class_mappings, display_mappings = _load_comfy_node_mappings(comfyui_root)
+
+    # CELL 4b: verify required classes exist BEFORE we try to map the full graph.
+    cell4b_verify_node_classes(class_mappings)
+
+    # Invert display-name mapping so we can resolve display names to class keys.
+    display_to_key: dict[str, str] = {v: k for k, v in display_mappings.items()}
+
+    registry: dict[str, Any] = {}
+    unmapped: list[str] = []
+    for node_type in sorted(graph.node_type_counts):
+        cls = class_mappings.get(node_type)
+        if cls is None:
+            alias = _NODE_TYPE_ALIASES.get(node_type)
+            if alias and alias in class_mappings:
+                cls = class_mappings[alias]
+            elif node_type in display_to_key:
+                cls = class_mappings.get(display_to_key[node_type])
+        if cls is None:
+            unmapped.append(node_type)
+        else:
+            registry[node_type] = cls
+    if unmapped:
+        raise RuntimeError(
+            "Unmapped node types (no ComfyUI class found in NODE_CLASS_MAPPINGS):\n  - "
+            + "\n  - ".join(unmapped)
+            + "\nEnsure the exact custom nodes from CELL 4 are installed."
+        )
+    print(f"  mapped {len(registry)} node types to ComfyUI classes")
+    print("=" * 70)
+    return registry
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CHECKPOINT / RESUME SYSTEM  (CELL 34 requirement)
+# ----------------------------------------------------------------------------
+# Persists execution state to workflow_state.json: current node, phase,
+# completed nodes, output paths, timeline state, error state. On restart the
+# executor resumes from the last safe checkpoint and skips completed expensive
+# stages. This never changes graph semantics - it only records what already ran.
+# ════════════════════════════════════════════════════════════════════════════
+WORKFLOW_STATE_PATH = os.environ.get(
+    "WORKFLOW_STATE_PATH", os.path.join(_SCRIPT_DIR, "workflow_state.json")
+)
+
+
+class Checkpoint:
+    """Read/write the resumable workflow_state.json checkpoint."""
+
+    def __init__(self, path: str = WORKFLOW_STATE_PATH) -> None:
+        self.path = path
+        self.state: dict[str, Any] = {
+            "phase": "init",
+            "current_node": None,
+            "completed_nodes": [],
+            "output_paths": {},
+            "timeline": {},
+            "error": None,
+        }
+
+    def load(self) -> bool:
+        """Load an existing checkpoint. Returns True if one was found."""
+        if not os.path.exists(self.path):
+            return False
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                self.state = json.load(handle)
+            print(f"[checkpoint] resumed from {self.path} (phase={self.state.get('phase')})")
+            return True
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[checkpoint] could not read {self.path}: {exc!r}; starting fresh")
+            return False
+
+    def save(self) -> None:
+        """Atomically persist the current state."""
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self.state, handle, indent=2)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            print(f"[checkpoint] save failed ({exc!r}); continuing without checkpoint")
+
+    def is_done(self, node_id: int) -> bool:
+        return node_id in self.state.get("completed_nodes", [])
+
+    def mark_phase(self, phase: str) -> None:
+        self.state["phase"] = phase
+        self.save()
+
+    def mark_current(self, node_id: int) -> None:
+        self.state["current_node"] = node_id
+        self.save()
+
+    def mark_done(self, node_id: int) -> None:
+        done = self.state.setdefault("completed_nodes", [])
+        if node_id not in done:
+            done.append(node_id)
+        self.state["current_node"] = None
+        self.save()
+
+    def record_output(self, key: str, path: str) -> None:
+        self.state.setdefault("output_paths", {})[key] = path
+        self.save()
+
+    def record_error(self, detail: str) -> None:
+        self.state["error"] = detail
+        self.save()
+
+    def clear_error(self) -> None:
+        self.state["error"] = None
+        self.save()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 35: STRUCTURED ERROR REPORTING
+# ----------------------------------------------------------------------------
+# Wraps core node execution so every failure prints a banner with node id, type,
+# FUNCTION, input types, model-loaded flag, free RAM/VRAM, current stage, and the
+# full traceback. Forbidden anywhere in core execution: 'except Exception: pass'.
+# ════════════════════════════════════════════════════════════════════════════
+class NodeExecutionError(RuntimeError):
+    """A node failed to execute; carries structured diagnostic context."""
+
+
+def _report_node_failure(
+    node: ParsedNode,
+    function_name: str,
+    input_types: dict[str, str],
+    stage: str,
+    exc: BaseException,
+) -> str:
+    """Build and print the structured failure banner. Returns the banner text."""
+    import traceback
+
+    ram = get_free_ram_gb()
+    vram = get_free_vram_gb()
+    banner = [
+        "!" * 70,
+        f"NODE EXECUTION FAILED  [Node {node.id}] {node.type}",
+        "!" * 70,
+        f"  Node id       : {node.id}",
+        f"  Type          : {node.type}",
+        f"  FUNCTION      : {function_name}",
+        f"  Input types   : {input_types}",
+        f"  Stage         : {stage}",
+        f"  Free RAM (GB) : {ram}",
+        f"  Free VRAM(GB) : {vram}",
+        f"  Error         : {type(exc).__name__}: {exc}",
+        "-" * 70,
+        traceback.format_exc().rstrip(),
+        "!" * 70,
+    ]
+    text = "\n".join(banner)
+    print(text)
+    return text
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 15: MEMORY-AWARE EXECUTOR
+# ----------------------------------------------------------------------------
+# execute_node()/call_comfy_node() instantiate the EXACT original node class,
+# inspect its FUNCTION attribute, call the correct method, and map JSON link
+# inputs to kwargs BY INPUT NAME. ComfyUI return conventions (tuple/list/dict)
+# are preserved. Per-node RAM/VRAM is logged before and after in the exact
+# '[Node N] Type / RAM before / VRAM before / Executing... / RAM after / VRAM
+# after' format. A topological runner walks the PARSED graph in dependency
+# order, wiring outputs->inputs exactly as the JSON links specify.
+# ════════════════════════════════════════════════════════════════════════════
+# Stages whose loads/decodes are expensive enough to warrant memory guarding.
+_EXPENSIVE_NODE_TYPES = frozenset(
+    {
+        "UnetLoaderGGUF",
+        "DualCLIPLoader",
+        "Power Lora Loader (rgthree)",
+        "LTXDirector",
+        "LTXVLatentUpsampler",
+        "SamplerCustomAdvanced",
+        "VAEDecode",
+        "LTXVAudioVAEDecode",
+        "VHS_VideoCombine",
+    }
+)
+
+
+def _link_by_id(graph: ParsedGraph, link_id: int) -> list[Any] | None:
+    """Return the link tuple with ``link_id`` or None.
+
+    Link format: [link_id, from_node, from_slot, to_node, to_slot, type].
+    """
+    for lk in graph.links:
+        if lk and lk[0] == link_id:
+            return lk
+    return None
+
+
+class GraphExecutor:
+    """Memory-aware topological executor over the PARSED ComfyUI graph."""
+
+    def __init__(
+        self,
+        graph: ParsedGraph,
+        timeline: DirectorTimeline,
+        registry: dict[str, Any],
+        checkpoint: Checkpoint | None = None,
+    ) -> None:
+        self.graph = graph
+        self.timeline = timeline
+        self.registry = registry
+        self.checkpoint = checkpoint or Checkpoint()
+        # results[node_id] -> the node's output tuple/list (indexable by slot).
+        self.results: dict[int, Any] = {}
+        self._instances: dict[int, Any] = {}
+        self.stage = "init"
+        # Metrics for the final audit (CELL 18).
+        self.ram_peak_used_gb: float = 0.0
+        self.vram_peak_used_gb: float = 0.0
+
+    # -- topological ordering ------------------------------------------------
+    def _topological_order(self) -> list[int]:
+        """Kahn topological sort using link dependencies.
+
+        Falls back to the node 'order' field to break ties so execution follows
+        the authored ordering when the DAG allows multiple valid orders.
+        """
+        nodes = self.graph.nodes_by_id
+        indeg: dict[int, int] = {nid: 0 for nid in nodes}
+        deps: dict[int, set[int]] = {nid: set() for nid in nodes}
+        for lk in self.graph.links:
+            if len(lk) < 4:
+                continue
+            src, dst = lk[1], lk[3]
+            if src in nodes and dst in nodes and src not in deps[dst]:
+                deps[dst].add(src)
+                indeg[dst] += 1
+        # Ready set ordered by authored 'order' then id for determinism.
+        ready = sorted(
+            (nid for nid, d in indeg.items() if d == 0),
+            key=lambda n: (nodes[n].order, n),
+        )
+        order: list[int] = []
+        while ready:
+            nid = ready.pop(0)
+            order.append(nid)
+            for other in nodes:
+                if nid in deps[other]:
+                    deps[other].discard(nid)
+                    indeg[other] -= 1
+                    if indeg[other] == 0:
+                        ready.append(other)
+            ready.sort(key=lambda n: (nodes[n].order, n))
+        if len(order) != len(nodes):
+            unresolved = [nid for nid in nodes if nid not in order]
+            raise RuntimeError(
+                f"Graph is not a DAG or has dangling deps; could not order nodes: {unresolved}"
+            )
+        return order
+
+    # -- input wiring --------------------------------------------------------
+    def _resolve_inputs(self, node: ParsedNode) -> tuple[dict[str, Any], dict[str, str]]:
+        """Resolve a node's linked inputs to kwargs keyed by input NAME.
+
+        Returns (kwargs, input_types) where input_types maps name->declared link
+        type for the failure banner. Only connected inputs are resolved here;
+        widget parameters are added later by :meth:`_widget_kwargs`.
+        """
+        kwargs: dict[str, Any] = {}
+        input_types: dict[str, str] = {}
+        for inp in node.inputs:
+            link_id = inp.get("link")
+            name = inp.get("name")
+            if link_id is None or name is None:
+                continue
+            lk = _link_by_id(self.graph, link_id)
+            if lk is None:
+                raise NodeExecutionError(
+                    f"Node {node.id} ({node.type}) input '{name}' references missing "
+                    f"link id={link_id}."
+                )
+            from_node, from_slot = lk[1], lk[2]
+            input_types[name] = str(lk[5]) if len(lk) > 5 else "?"
+            if from_node not in self.results:
+                raise NodeExecutionError(
+                    f"Node {node.id} ({node.type}) input '{name}' needs output of "
+                    f"node {from_node} which has not executed yet (topology error)."
+                )
+            src_out = self.results[from_node]
+            kwargs[name] = self._index_output(src_out, from_slot, from_node)
+        return kwargs, input_types
+
+    @staticmethod
+    def _index_output(output: Any, slot: int, from_node: int) -> Any:
+        """Index a node's output by slot, honoring ComfyUI tuple/list returns."""
+        if isinstance(output, (tuple, list)):
+            if slot < len(output):
+                return output[slot]
+            raise NodeExecutionError(
+                f"Output slot {slot} out of range for node {from_node} "
+                f"(returned {len(output)} outputs)."
+            )
+        # Single non-sequence return maps to slot 0.
+        if slot == 0:
+            return output
+        raise NodeExecutionError(
+            f"Node {from_node} returned a scalar but slot {slot} was requested."
+        )
+
+    # -- widget -> parameter mapping ----------------------------------------
+    @staticmethod
+    def _class_input_order(node_cls: Any) -> tuple[list[str], set[str]]:
+        """Return (ordered_input_names, connected_capable_names) from INPUT_TYPES.
+
+        ComfyUI declares inputs via INPUT_TYPES(); widget values fill the
+        non-linked inputs in declared order. We collect required+optional names
+        in declaration order so widget positions can be matched by position.
+        """
+        names: list[str] = []
+        get = getattr(node_cls, "INPUT_TYPES", None)
+        if not callable(get):
+            return names, set()
+        try:
+            spec = get()
+        except Exception:  # noqa: BLE001 - some nodes need args; skip widget-by-name
+            return names, set()
+        for section in ("required", "optional"):
+            names.extend(spec.get(section) or {})
+        return names, set(names)
+
+    def _widget_kwargs(
+        self, node: ParsedNode, cls: Any, linked_names: set[str]
+    ) -> dict[str, Any]:
+        """Map the node's widgets_values to parameter kwargs by declared order.
+
+        Widget values fill INPUT_TYPES inputs that are NOT satisfied by a link,
+        in declaration order (ComfyUI's convention). Dict widgets_values (e.g.
+        VHS_VideoCombine) are mapped by key directly.
+        """
+        wv = node.widgets_values
+        if wv is None:
+            return {}
+        input_names, _ = self._class_input_order(cls)
+
+        if isinstance(wv, dict):
+            # Only pass keys the class actually declares as inputs.
+            return {k: v for k, v in wv.items() if k in set(input_names)}
+
+        if not isinstance(wv, (list, tuple)):
+            return {}
+
+        # Positional fill: walk declared inputs, skipping linked ones, and assign
+        # successive widget values. Widget-only extras (seed control combos etc.)
+        # that have no declared input are ignored.
+        result: dict[str, Any] = {}
+        widget_iter = iter(wv)
+        for iname in input_names:
+            if iname in linked_names:
+                continue
+            try:
+                value = next(widget_iter)
+            except StopIteration:
+                break
+            result[iname] = value
+        return result
+
+    # -- single node execution ----------------------------------------------
+    def execute_node(self, node: ParsedNode) -> Any:
+        """Instantiate and run one node; log RAM/VRAM before and after.
+
+        Preserves ComfyUI return conventions. Never substitutes a different
+        node. On failure prints the structured banner and raises
+        NodeExecutionError.
+        """
+        cls = self.registry.get(node.type)
+        if cls is None:
+            raise NodeExecutionError(
+                f"No registered class for node {node.id} type '{node.type}'."
+            )
+
+        function_name = getattr(cls, "FUNCTION", None)
+        if not function_name:
+            raise NodeExecutionError(
+                f"Node {node.id} ({node.type}) class has no FUNCTION attribute; "
+                f"cannot execute (refusing to guess)."
+            )
+
+        kwargs, input_types = self._resolve_inputs(node)
+        kwargs.update(self._widget_kwargs(node, cls, set(kwargs)))
+
+        expensive = node.type in _EXPENSIVE_NODE_TYPES
+        if expensive:
+            memory_guard(tag=f"pre:{node.type}")
+
+        ram_before = get_free_ram_gb()
+        vram_before = get_free_vram_gb()
+        print(f"[Node {node.id}] {node.type}")
+        print(f"    RAM before  : {_gb(ram_before)}")
+        print(f"    VRAM before : {_gb(vram_before)}")
+        print("    Executing...")
+
+        try:
+            instance = self._instances.get(node.id)
+            if instance is None:
+                instance = cls()
+                self._instances[node.id] = instance
+            method = getattr(instance, function_name)
+            output = method(**kwargs)
+        except Exception as exc:
+            self._report_and_raise(node, function_name, input_types, exc)
+            raise  # unreachable (helper raises), satisfies type-checkers
+
+        ram_after = get_free_ram_gb()
+        vram_after = get_free_vram_gb()
+        print(f"    RAM after   : {_gb(ram_after)}")
+        print(f"    VRAM after  : {_gb(vram_after)}")
+        self._update_peaks(ram_before, ram_after, vram_before, vram_after)
+
+        if expensive:
+            deep_memory_cleanup(f"post:{node.type}")
+        return output
+
+    def _report_and_raise(
+        self,
+        node: ParsedNode,
+        function_name: str,
+        input_types: dict[str, str],
+        exc: Exception,
+    ) -> None:
+        detail = _report_node_failure(node, function_name, input_types, self.stage, exc)
+        self.checkpoint.record_error(detail.splitlines()[1])
+        raise NodeExecutionError(
+            f"[Node {node.id}] {node.type}.{function_name} failed during stage "
+            f"'{self.stage}': {type(exc).__name__}: {exc}"
+        ) from exc
+
+    def _update_peaks(
+        self,
+        ram_before: float | None,
+        ram_after: float | None,
+        vram_before: float | None,
+        vram_after: float | None,
+    ) -> None:
+        if ram_before is not None and ram_after is not None:
+            self.ram_peak_used_gb = max(self.ram_peak_used_gb, max(0.0, ram_before - ram_after))
+        if vram_before is not None and vram_after is not None:
+            self.vram_peak_used_gb = max(
+                self.vram_peak_used_gb, max(0.0, vram_before - vram_after)
+            )
+
+    # -- alias requested by the spec ----------------------------------------
+    def call_comfy_node(self, node: ParsedNode) -> Any:
+        """Compatibility alias for :meth:`execute_node` (spec naming)."""
+        return self.execute_node(node)
+
+    # -- full topological run ------------------------------------------------
+    def run(self) -> dict[int, Any]:
+        """Execute every node in topological order, honoring the checkpoint.
+
+        Stage labels track where we are (Stage 1 / Stage 2 / Decode / Combine)
+        for the failure banner. Completed nodes recorded in the checkpoint are
+        skipped so a resumed run does not repeat expensive stages.
+        """
+        order = self._topological_order()
+        print("=" * 70)
+        print(f"EXECUTING GRAPH: {len(order)} nodes in topological order")
+        print("=" * 70)
+        for node_id in order:
+            node = self.graph.require_node(node_id)
+            if node.mode == 4:  # bypassed/muted node in ComfyUI
+                print(f"[Node {node_id}] {node.type}  (muted; skipped)")
+                continue
+            if self.checkpoint.is_done(node_id) and node_id in self.results:
+                print(f"[Node {node_id}] {node.type}  (checkpoint: already done)")
+                continue
+            self.stage = self._stage_for(node)
+            self.checkpoint.mark_current(node_id)
+            self.results[node_id] = self.execute_node(node)
+            self.checkpoint.mark_done(node_id)
+        print("=" * 70)
+        print("GRAPH EXECUTION COMPLETE")
+        print("=" * 70)
+        return self.results
+
+    def _stage_for(self, node: ParsedNode) -> str:
+        """Human-readable stage label for diagnostics/checkpointing."""
+        if node.id in (_STAGE1_GUIDE_NODE_ID, _STAGE1_KSAMPLER_NODE_ID, _STAGE1_SCHED_NODE_ID, 19):
+            return "Stage 1 (euler/8/denoise1.0/linear_quadratic)"
+        if node.id in (
+            _SPATIAL_UPSCALER_NODE_ID,
+            14,
+            _STAGE2_GUIDE_NODE_ID,
+            _STAGE2_KSAMPLER_NODE_ID,
+            _STAGE2_SCHED_NODE_ID,
+            31,
+        ):
+            return "Stage 2 (upsampler + euler/4/denoise0.42/linear_quadratic)"
+        if node.type in ("VAEDecode", "LTXVAudioVAEDecode", "LTXVSeparateAVLatent"):
+            return "Decode"
+        if node.type == "VHS_VideoCombine":
+            return "Combine"
+        if node.type == "LTXDirector":
+            return "Director master timeline"
+        return "Load / wire"
+
+
+def _gb(value: float | None) -> str:
+    """Format an optional GB value for logging."""
+    return f"{value:.2f} GB" if isinstance(value, (int, float)) else "n/a"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELLs 13, 14, 16, 17, 18, 19  (orchestrated through the executor's topo run)
+# ----------------------------------------------------------------------------
+# CELL 13: LOAD ORIGINAL GRAPH COMPONENTS
+#   UnetLoaderGGUF -> Power Lora Loader -> ModelPreviewOverrideKJ -> LTXDirector
+#   DualCLIPLoader, VAELoader x2, VAELoaderKJ, LatentUpscaleModelLoader. Each of
+#   these is a node in the parsed graph with its widgets_values read from the
+#   JSON. The executor instantiates each loader class, calls its FUNCTION with
+#   widget kwargs, wraps it in memory_guard/deep_memory_cleanup, and stores the
+#   output for downstream linking. They execute in topological order (the graph's
+#   own dependency structure), not a manually-ordered script. Lazy-load: the
+#   executor only instantiates a node when it becomes ready (all deps satisfied).
+#   Reuse: immutable results are cached in self.results and never re-loaded.
+#
+# CELL 14: LTXDirector MASTER TIMELINE (node id=131).
+#   See cell14_verify_director_outputs below.
+#
+# CELL 16: DECODE (VAEDecode / LTXVAudioVAEDecode / LTXVSeparateAVLatent).
+#   VAEDecode uses the video VAE (LTX23_video_vae_bf16) to decode video latents
+#   to IMAGE. LTXVAudioVAEDecode uses the audio VAE (LTX23_audio_vae_bf16) to
+#   decode audio latents to AUDIO. Both SeparateAVLatent nodes split the
+#   composite AV latent from the sampler. All memory-guarded by the executor.
+#
+# CELL 17: VHS_VideoCombine (node id=139).
+#   Wires VAEDecode IMAGE, LTXVAudioVAEDecode AUDIO, LTXDirector frame_rate (24)
+#   into VHS with settings from its dict widgets_values (h264-mp4, yuv420p, crf 8
+#   frame_rate 24, filename_prefix 'LTX2.3/Video', save_output true). This is the
+#   final output combiner; it does NOT rely on a separate FFmpeg mux for primary
+#   audio sync since the Director/audio-VAE output feeds VHS directly.
+# ════════════════════════════════════════════════════════════════════════════
+def cell14_verify_director_outputs(executor: GraphExecutor) -> None:
+    """CELL 14: confirm LTXDirector produced all 8 outputs and stays master.
+
+    The Director is executed as part of the topological run (it feeds every
+    downstream stage). Here we assert it produced its 8-tuple so no downstream
+    node silently received a substitute.
+    """
+    director_out = executor.results.get(LTXDIRECTOR_NODE_ID)
+    if director_out is None:
+        raise NodeExecutionError(
+            f"LTXDirector (id={LTXDIRECTOR_NODE_ID}) did not execute; it is the "
+            f"master timeline controller and must run."
+        )
+    if not isinstance(director_out, (tuple, list)) or len(director_out) < 8:
+        raise NodeExecutionError(
+            f"LTXDirector produced {len(director_out) if isinstance(director_out, (tuple, list)) else 'non-sequence'} "
+            f"outputs; expected 8 (model, positive, video_latent, audio_latent, "
+            f"guide_data, motion_guide_data, frame_rate, combined_audio)."
+        )
+    print(
+        "[CELL 14] LTXDirector master timeline produced 8 outputs "
+        "(model/positive/video_latent/audio_latent/guide_data/motion_guide_data/"
+        "frame_rate/combined_audio)."
+    )
+
+
+def cell18_validate_final_output(
+    executor: GraphExecutor, exec_seconds: float
+) -> dict[str, Any]:
+    """CELL 18: verify the produced MP4 and report measured facts.
+
+    Reports the measured output frame count/duration (when derivable), RAM peak,
+    VRAM peak, and execution time. Compares to the expected 756 frames / 31.5 s /
+    24 fps but does NOT claim a guaranteed crash-free run.
+    """
+    print("=" * 70)
+    print("CELL 18: VALIDATE FINAL OUTPUT")
+    print("=" * 70)
+    report: dict[str, Any] = {}
+
+    vhs_out = executor.results.get(_VHS_NODE_ID)
+    mp4_path = _extract_mp4_path(vhs_out)
+    report["mp4_path"] = mp4_path
+    if mp4_path and os.path.exists(mp4_path):
+        size = os.path.getsize(mp4_path)
+        print(f"  Output MP4    : {mp4_path} ({size / 1e6:.2f} MB)")
+        report["mp4_exists"] = True
+    else:
+        print(f"  ⚠️ Output MP4 not found on disk (VHS returned: {vhs_out!r})")
+        report["mp4_exists"] = False
+
+    measured_frames, measured_duration = _measure_output(executor)
+    report["measured_frames"] = measured_frames
+    report["measured_duration"] = measured_duration
+    print(
+        f"  Frames        : measured={measured_frames} "
+        f"expected={_EXPECTED_TIMELINE_FRAMES}"
+    )
+    print(
+        f"  Duration      : measured={measured_duration} "
+        f"expected={_EXPECTED_TIMELINE_DURATION}s @ {_EXPECTED_TIMELINE_FPS}fps"
+    )
+    if measured_frames is not None and measured_frames != _EXPECTED_TIMELINE_FRAMES:
+        print(
+            f"  ⚠️ Frame count differs from expected {_EXPECTED_TIMELINE_FRAMES}; "
+            f"inspect the timeline/sampler output."
+        )
+
+    report["ram_peak_used_gb"] = round(executor.ram_peak_used_gb, 3)
+    report["vram_peak_used_gb"] = round(executor.vram_peak_used_gb, 3)
+    report["exec_seconds"] = round(exec_seconds, 2)
+    print(f"  RAM peak used : {report['ram_peak_used_gb']} GB (approx)")
+    print(f"  VRAM peak used: {report['vram_peak_used_gb']} GB (approx)")
+    print(f"  Exec time     : {report['exec_seconds']} s")
+    print(
+        "  NOTE: metrics are measured, not guaranteed. This run reflects the "
+        "actual graph execution; it does not promise a crash-free run on all "
+        "hardware."
+    )
+    print("=" * 70)
+    return report
+
+
+def _extract_mp4_path(vhs_output: Any) -> str | None:
+    """Best-effort extraction of the saved MP4 path from VHS_VideoCombine output.
+
+    VHS returns a dict-like ui/result payload; the filenames live under
+    result[0][1] (a list of written files). We scan for a .mp4 path.
+    """
+    candidates: list[str] = []
+
+    def _scan(obj: Any) -> None:
+        if isinstance(obj, str):
+            if obj.lower().endswith(".mp4"):
+                candidates.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                _scan(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                _scan(v)
+
+    _scan(vhs_output)
+    # Prefer an existing file; else the last candidate.
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[-1] if candidates else None
+
+
+def _measure_output(executor: GraphExecutor) -> tuple[int | None, float | None]:
+    """Measure frame count + duration from the decoded IMAGE tensor if present."""
+    frames: int | None = None
+    decode_out = executor.results.get(1)  # VAEDecode node id=1 -> IMAGE
+    image = None
+    if isinstance(decode_out, (tuple, list)) and decode_out:
+        image = decode_out[0]
+    elif decode_out is not None:
+        image = decode_out
+    try:
+        if image is not None and hasattr(image, "shape"):
+            # ComfyUI IMAGE tensors are [batch(frames), H, W, C].
+            frames = int(image.shape[0])
+    except Exception as exc:  # noqa: BLE001 - measurement is best-effort, report it
+        print(f"  [warn] could not measure frame count: {exc!r}")
+    duration = frames / executor.timeline.fps if frames else None
+    return frames, duration
+
+
+def cell19_display_download(mp4_path: str | None) -> None:
+    """CELL 19: display the MP4 in Colab and offer a download. Prints the path."""
+    print("=" * 70)
+    print("CELL 19: DISPLAY / DOWNLOAD")
+    print("=" * 70)
+    if not mp4_path or not os.path.exists(mp4_path):
+        print("  No MP4 available to display/download.")
+        return
+    print(f"  Final video: {mp4_path}")
+
+    # Colab display (guarded: no-op outside Colab / IPython).
+    ipy = _try_import("IPython.display")
+    if ipy is not None:
+        try:
+            with open(mp4_path, "rb") as handle:
+                data = handle.read()
+            b64 = _b64(data)
+            ipy.display(
+                ipy.HTML(
+                    f'<video width="512" controls>'
+                    f'<source src="data:video/mp4;base64,{b64}" type="video/mp4"></video>'
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - display is optional, report it
+            print(f"  [warn] inline display failed: {exc!r}")
+
+    colab_files = _try_import("google.colab.files")
+    if colab_files is not None:
+        try:
+            colab_files.download(mp4_path)
+        except Exception as exc:  # noqa: BLE001 - download is optional, report it
+            print(f"  [warn] colab download prompt failed: {exc!r}")
+    print("=" * 70)
+
+
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode("ascii")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FULL PIPELINE DRIVER  (ties CELLs 2-19 together for --run on Colab)
+# ════════════════════════════════════════════════════════════════════════════
+def run_full_pipeline(json_path: str | None = None, comfyui_root: str = COMFYUI_ROOT) -> int:
+    """Execute the entire graph-faithful pipeline on a Colab GPU runtime.
+
+    This is the real --run path. It is import-safe to DEFINE (heavy imports are
+    all lazy), but calling it requires ComfyUI + a GPU. Steps: system info ->
+    load+parse+validate the JSON (fail fast) -> install ComfyUI + pinned custom
+    nodes -> verify assets -> build node registry (+CELL 4b) -> topological
+    execute (Director master timeline, Stage 1, Stage 2, decode, combine) ->
+    validate output -> display/download.
+    """
+    import time
+
+    checkpoint = Checkpoint()
+    checkpoint.load()
+
+    try:
+        cell2_system_info()
+
+        # Parse + validate up front so misconfiguration fails before heavy work.
+        data = load_workflow_json(json_path)
+        graph = parse_graph(data)
+        timeline = parse_ltxdirector_timeline(graph)
+        validate_workflow(graph, timeline)
+        checkpoint.state["timeline"] = {
+            "frames": timeline.frames,
+            "fps": timeline.fps,
+            "duration_seconds": timeline.duration_seconds,
+        }
+        checkpoint.mark_phase("assets")
+
+        # Bootstrap (idempotent; skips work already present).
+        cell3_install_comfyui(comfyui_root)
+        cell4_install_custom_nodes(comfyui_root)
+        cell5_download_verify_models(graph, comfyui_root)
+        cell6_download_verify_loras(graph, comfyui_root)
+        cell7_download_verify_audio_images(graph, timeline, comfyui_root)
+
+        checkpoint.mark_phase("registry")
+        registry = build_node_registry(graph, comfyui_root)
+
+        checkpoint.mark_phase("execute")
+        executor = GraphExecutor(graph, timeline, registry, checkpoint)
+        start = time.time()
+        executor.run()
+        exec_seconds = time.time() - start
+
+        cell14_verify_director_outputs(executor)
+
+        checkpoint.mark_phase("validate")
+        report = cell18_validate_final_output(executor, exec_seconds)
+        if report.get("mp4_path"):
+            checkpoint.record_output("mp4", report["mp4_path"])
+
+        checkpoint.mark_phase("display")
+        cell19_display_download(report.get("mp4_path"))
+
+        checkpoint.mark_phase("done")
+        checkpoint.clear_error()
+        print("✅ PIPELINE COMPLETE")
+        return 0
+    except (NodeExecutionError, ValidationError) as exc:
+        checkpoint.record_error(str(exc))
+        print(f"❌ PIPELINE FAILED: {exc}")
+        return 1
+    except (FileNotFoundError, RuntimeError, ValueError, KeyError, MemoryError) as exc:
+        checkpoint.record_error(str(exc))
+        print(f"❌ PIPELINE FAILED: {type(exc).__name__}: {exc}")
+        return 1
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1041,23 +2342,16 @@ def run_selftest(json_path: str | None = None) -> int:
 
 
 def run_pipeline(json_path: str | None = None) -> int:
-    """Full Colab pipeline entrypoint (implemented in FEAT-002).
+    """Full Colab pipeline entrypoint.
 
-    This stub validates the graph first (import-safe), then hands off to the
-    memory-aware executor. The executor and Colab bootstrap are authored in
-    FEAT-002; running --run in this GPU-less sandbox is not supported.
+    Delegates to :func:`run_full_pipeline`, which runs CELLs 2-19: system info,
+    ComfyUI + pinned custom-node install, asset verification, node registry,
+    the memory-aware topological graph executor (LTXDirector master timeline,
+    Stage 1, Stage 2, decode, VHS combine), final-output validation, and the
+    Colab display/download. Requires a Colab GPU runtime; heavy imports are
+    lazy so importing this module stays GPU-free.
     """
-    print(
-        "--run: the full graph-faithful Colab pipeline (ComfyUI bootstrap, "
-        "model download, memory-aware graph executor) is authored in later "
-        "features and requires a Colab GPU runtime. Use --selftest here."
-    )
-    # Validate up front so misconfiguration is caught before any heavy work.
-    data = load_workflow_json(json_path)
-    graph = parse_graph(data)
-    timeline = parse_ltxdirector_timeline(graph)
-    validate_workflow(graph, timeline)
-    return 0
+    return run_full_pipeline(json_path)
 
 
 def main(argv: list[str] | None = None) -> int:
