@@ -74,7 +74,11 @@ os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "65536")
 # Default path to the source-of-truth workflow JSON. Overridable for Colab via
 # the WORKFLOW_JSON_PATH env var or the CLI. Defaults to the file that ships
 # next to this script in the repo.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+try:
+    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    # Running in Jupyter/Colab where __file__ is not defined
+    _SCRIPT_DIR = os.getcwd()
 WORKFLOW_JSON_PATH = os.environ.get(
     "WORKFLOW_JSON_PATH",
     os.path.join(_SCRIPT_DIR, "LTX-2.3_Director_2.0-MV-Workflow-30s.json"),
@@ -2676,16 +2680,24 @@ def run_final_selfcheck(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
     # --- 13. No fake 5-scene loop ---
     # Verify: this file does NOT contain a GENERATION loop iterating 5 scenes.
     # We inspect our own source code (excluding comments and strings) to confirm.
-    own_source_path = os.path.abspath(__file__)
+    try:
+        own_source_path = os.path.abspath(__file__)
+    except NameError:
+        # Running in Jupyter/Colab - use a sentinel to skip source self-inspection
+        own_source_path = ""
     source_clean = True
     neg_details: list[str] = []
-    try:
-        with open(own_source_path, encoding="utf-8") as f:
-            source_lines = f.readlines()
-    except OSError:
+    if own_source_path:
+        try:
+            with open(own_source_path, encoding="utf-8") as f:
+                source_lines = f.readlines()
+        except OSError:
+            source_lines = []
+            source_clean = False
+            neg_details.append("could not read own source")
+    else:
         source_lines = []
-        source_clean = False
-        neg_details.append("could not read own source")
+        neg_details.append("running in Colab/Jupyter - source self-inspection skipped")
 
     source = "".join(source_lines)
 
