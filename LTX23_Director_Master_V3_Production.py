@@ -1642,13 +1642,19 @@ def execute_segment_wise_diffusion_pipeline(
             model = load_dit_and_loras()    # FIX-04 auto CPU-offload inside
             LTXDirectorMemoryManager.watermark("after_dit_load")
 
+            # FIX-05 CORRECTED: LTXDirectorGuide.execute() unconditionally calls
+            # vae.downscale_index_formula — VAE MUST be present for both guides.
+            # Load once here, share across Guide1→Upscale→Guide2, delete after Guide2.
+            video_vae = gv(call_original_node("VAELoader", vae_name="LTX23_video_vae_bf16.safetensors"), 0)
+            LTXDirectorMemoryManager.watermark("after_vae_load")
+
             # ── Guide 1 (strength 0.5) ────────────────────────────────────
             guide1_node   = NODE_CLASS_MAPPINGS["LTXDirectorGuide"]()
             guide1_res    = call_original_node(
                 "LTXDirectorGuide", node_instance=guide1_node,
                 positive=director_state["positive"],
                 negative=director_state["negative"],
-                vae=None,                        # FIX-05: no VAE yet
+                vae=video_vae,                   # Required: VAE must not be None
                 latent=seg_vid_lat,
                 guide_data=director_state["guide_data"],
                 motion_guide_data=director_state["motion_guide_data"],
@@ -1752,10 +1758,9 @@ def execute_segment_wise_diffusion_pipeline(
             gc.collect()
             LTXDirectorMemoryManager.watermark("after_crop1")
 
-            # ── STEP B2: 2× Latent Upscale — FIX-05: load VAE here ───────
+            # ── STEP B2: 2× Latent Upscale ───────────────────────────────
+            # video_vae already loaded above — reuse it here
             print("  ⚡ Upscaling Latent 2× via LTXVLatentUpsampler...")
-            video_vae = gv(call_original_node("VAELoader", vae_name="LTX23_video_vae_bf16.safetensors"), 0)
-
             upscale_loader   = NODE_CLASS_MAPPINGS["LatentUpscaleModelLoader"]()
             up_model         = gv(call_original_node(
                 "LatentUpscaleModelLoader", node_instance=upscale_loader,
@@ -1767,23 +1772,19 @@ def execute_segment_wise_diffusion_pipeline(
                 samples=crop1_vid, upscale_model=up_model, vae=video_vae,
             )
             v_upscaled       = sync_latent_device(gv(upscaled_res, 0), "cpu")
-            # FIX-05: free upscaler and VAE immediately
             del up_model, upscaled_res, upscale_loader, upsampler_node
-            del video_vae
             gc.collect()
             torch.cuda.empty_cache()
             LTXDirectorMemoryManager.watermark("after_upscale")
 
             # ── STEP B3: Stage 2 Refinement (4 steps, denoise 0.42) ───────
-            # Re-load VAE only for Stage 2 guide (then delete again)
-            video_vae_s2 = gv(call_original_node("VAELoader", vae_name="LTX23_video_vae_bf16.safetensors"), 0)
-
+            # Reuse video_vae for Guide 2 — delete after this guide only
             guide2_node = NODE_CLASS_MAPPINGS["LTXDirectorGuide"]()
             guide2_res  = call_original_node(
                 "LTXDirectorGuide", node_instance=guide2_node,
                 positive=crop1_pos,
                 negative=crop1_neg,
-                vae=video_vae_s2,
+                vae=video_vae,                   # Reuse — VAE required here too
                 latent=v_upscaled,
                 guide_data=director_state["guide_data"],
                 motion_guide_data=director_state["motion_guide_data"],
@@ -1800,7 +1801,7 @@ def execute_segment_wise_diffusion_pipeline(
             s2_vid   = sync_latent_device(gv(guide2_res, 2) or v_upscaled, "cpu")
             s2_model = gv(guide2_res, 3) or model
             del guide2_res, guide2_node, crop1_pos, crop1_neg, crop1_vid, v_upscaled
-            del video_vae_s2
+            del video_vae    # Single VAE lifetime: Guide1 → Upscale → Guide2 → delete
             gc.collect()
             LTXDirectorMemoryManager.watermark("after_guide2")
 
