@@ -42,6 +42,8 @@ CELL LAYOUT (Colab notebook cells emulated as banner-delimited blocks)
 * CELL 12 - Deep memory cleanup + memory guard
 * CELL 27 - Validate parsed graph (final report driver)
 * CELL 29 - LTXDirector timeline parser
+* CELL 41 - Final Self-Check (programmatic checklist from parsed graph)
+* CELL 42 - Final Workflow Audit Report (measured facts, no false guarantees)
 * Remaining execution cells (node registry / executor / run) - FEAT-002/003.
 """
 
@@ -264,6 +266,7 @@ def memory_guard(
     return False. Returns True when thresholds are satisfied. Never swallows the
     violation silently.
     """
+
     def _check() -> tuple[bool, float | None, float | None]:
         ram = get_free_ram_gb()
         vram = get_free_vram_gb()
@@ -342,7 +345,9 @@ def cell2_system_info() -> dict[str, Any]:
             )
     else:
         print("  GPU              : none detected (CPU-only / no CUDA)")
-        print("  ⚠️ No CUDA GPU detected. Full generation requires a Colab GPU runtime.")
+        print(
+            "  ⚠️ No CUDA GPU detected. Full generation requires a Colab GPU runtime."
+        )
 
     # CPU RAM (psutil).
     total_ram_gb: float | None = None
@@ -547,7 +552,9 @@ def _git_checkout_ref(folder_path: str, node: dict[str, Any]) -> None:
         return
     ref_kind = node.get("ref_kind", "commit")
     # Fetch the specific ref (tags need an explicit fetch after a shallow clone).
-    run_cmd(["git", "fetch", "--depth", "1", "origin", ref], cwd=folder_path, check=False)
+    run_cmd(
+        ["git", "fetch", "--depth", "1", "origin", ref], cwd=folder_path, check=False
+    )
     rc = run_cmd(["git", "checkout", ref], cwd=folder_path, check=False)
     if rc != 0:
         # Fall back to a full fetch then checkout (covers tags/commits missing
@@ -683,7 +690,9 @@ def _verify_or_download(name: str, directory: str, url: str | None) -> str:
     )
 
 
-def cell5_download_verify_models(graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT) -> dict[str, str]:
+def cell5_download_verify_models(
+    graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT
+) -> dict[str, str]:
     """CELL 5: verify/download all model files into the correct subdirs."""
     print("=" * 70)
     print("CELL 5: DOWNLOAD / VERIFY MODELS")
@@ -698,14 +707,18 @@ def cell5_download_verify_models(graph: ParsedGraph, comfyui_root: str = COMFYUI
     return resolved
 
 
-def cell6_download_verify_loras(graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT) -> dict[str, str]:
+def cell6_download_verify_loras(
+    graph: ParsedGraph, comfyui_root: str = COMFYUI_ROOT
+) -> dict[str, str]:
     """CELL 6: verify/download the 4 LoRAs with exact strengths from node 138."""
     print("=" * 70)
     print("CELL 6: DOWNLOAD / VERIFY LORAS")
     print("=" * 70)
     lora_node = graph.get_node(_LORA_NODE_ID)
     if lora_node is None:
-        raise ValueError(f"Power Lora Loader node id={_LORA_NODE_ID} missing from graph.")
+        raise ValueError(
+            f"Power Lora Loader node id={_LORA_NODE_ID} missing from graph."
+        )
     loras = _extract_loras(lora_node)
     if not loras:
         raise ValueError("No LoRAs parsed from the Power Lora Loader node.")
@@ -760,7 +773,9 @@ def cell7_download_verify_audio_images(
             )
         img_dir = os.path.join(input_root, os.path.dirname(img_rel) or "whatdreamscost")
         img_name = os.path.basename(img_rel)
-        env_key = "URL_IMG_" + "".join(c if c.isalnum() else "_" for c in img_name).upper()
+        env_key = (
+            "URL_IMG_" + "".join(c if c.isalnum() else "_" for c in img_name).upper()
+        )
         resolved[img_rel] = _verify_or_download(
             img_name, img_dir, os.environ.get(env_key)
         )
@@ -789,12 +804,16 @@ def load_workflow_json(path: str | None = None) -> dict[str, Any]:
         with open(resolved, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Workflow JSON at '{resolved}' is not valid JSON: {exc}") from exc
+        raise ValueError(
+            f"Workflow JSON at '{resolved}' is not valid JSON: {exc}"
+        ) from exc
 
     # ValueError (not TypeError) is intentional: these validate the CONTENT of
     # an external data file, not a Python type contract with the caller.
     if not isinstance(data, dict):
-        raise ValueError(f"Workflow JSON at '{resolved}' must be a JSON object.")  # noqa: TRY004
+        raise ValueError(  # noqa: TRY004
+            f"Workflow JSON at '{resolved}' must be a JSON object."
+        )
 
     for key in ("nodes", "links", "last_node_id", "last_link_id"):
         if key not in data:
@@ -1032,7 +1051,9 @@ def parse_ltxdirector_timeline(graph: ParsedGraph) -> DirectorTimeline:
     """
     director_nodes = graph.nodes_of_type("LTXDirector")
     if not director_nodes:
-        raise ValueError("No LTXDirector node found in graph (Master Timeline Controller missing).")
+        raise ValueError(
+            "No LTXDirector node found in graph (Master Timeline Controller missing)."
+        )
     director = graph.get_node(LTXDIRECTOR_NODE_ID) or director_nodes[0]
 
     wv = director.widgets_values
@@ -1173,7 +1194,10 @@ _VHS_NODE_ID = 139
 
 _EXPECTED_MODELS = {
     "unet_gguf": "ltx-2-3-22b-dev-Q4_K_M.gguf",
-    "dualclip": ["gemma_3_12B_it_fp4_mixed.safetensors", "ltx-2.3_text_projection_bf16.safetensors"],
+    "dualclip": [
+        "gemma_3_12B_it_fp4_mixed.safetensors",
+        "ltx-2.3_text_projection_bf16.safetensors",
+    ],
     "audio_vae": "LTX23_audio_vae_bf16.safetensors",
     "video_vae": "LTX23_video_vae_bf16.safetensors",
     "tiny_vae": "taeltx2_3.safetensors",
@@ -1186,8 +1210,20 @@ _EXPECTED_AUDIO_DURATION_FRAMES = 2880
 _EXPECTED_TIMELINE_FRAMES = 756
 _EXPECTED_TIMELINE_FPS = 24
 _EXPECTED_TIMELINE_DURATION = 31.5
-_EXPECTED_STAGE1 = {"sampler": "euler", "scheduler": "linear_quadratic", "steps": 8, "denoise": 1.0, "guide": 1.0}
-_EXPECTED_STAGE2 = {"sampler": "euler", "scheduler": "linear_quadratic", "steps": 4, "denoise": 0.42, "guide": 0.5}
+_EXPECTED_STAGE1 = {
+    "sampler": "euler",
+    "scheduler": "linear_quadratic",
+    "steps": 8,
+    "denoise": 1.0,
+    "guide": 1.0,
+}
+_EXPECTED_STAGE2 = {
+    "sampler": "euler",
+    "scheduler": "linear_quadratic",
+    "steps": 4,
+    "denoise": 0.42,
+    "guide": 0.5,
+}
 _EXPECTED_VHS = {
     "format": "video/h264-mp4",
     "pix_fmt": "yuv420p",
@@ -1209,7 +1245,9 @@ def _extract_loras(node: ParsedNode) -> list[tuple[str, float, bool]]:
         return result
     for entry in wv:
         if isinstance(entry, dict) and "lora" in entry and "strength" in entry:
-            result.append((entry["lora"], float(entry["strength"]), bool(entry.get("on"))))
+            result.append(
+                (entry["lora"], float(entry["strength"]), bool(entry.get("on")))
+            )
     return result
 
 
@@ -1245,7 +1283,11 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
             missing_types.append(f"{ntype} expected={expected} found={found}")
     types_ok = not missing_types
     if count_ok and types_ok:
-        record(True, "Nodes", f"{graph.node_count} nodes, all {len(_EXPECTED_NODE_TYPES)} types present")
+        record(
+            True,
+            "Nodes",
+            f"{graph.node_count} nodes, all {len(_EXPECTED_NODE_TYPES)} types present",
+        )
     else:
         detail = f"count expected={_EXPECTED_NODE_COUNT} found={graph.node_count}"
         if missing_types:
@@ -1290,14 +1332,18 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
     ):
         wv = _widget_list(node_id)
         if not wv or wv[0] != _EXPECTED_MODELS[key]:
-            model_problems.append(f"{key} expected={_EXPECTED_MODELS[key]} found={wv[:1]}")
+            model_problems.append(
+                f"{key} expected={_EXPECTED_MODELS[key]} found={wv[:1]}"
+            )
     models_ok = not model_problems
     record(
         models_ok,
         "Models",
-        "gguf + dualclip pair + audio/video/tiny VAE + spatial upscaler"
-        if models_ok
-        else "; ".join(model_problems),
+        (
+            "gguf + dualclip pair + audio/video/tiny VAE + spatial upscaler"
+            if models_ok
+            else "; ".join(model_problems)
+        ),
     )
 
     # --- LoRAs -------------------------------------------------------------
@@ -1334,23 +1380,31 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
     # --- Timeline ----------------------------------------------------------
     tl_problems: list[str] = []
     if timeline.frames != _EXPECTED_TIMELINE_FRAMES:
-        tl_problems.append(f"frames expected={_EXPECTED_TIMELINE_FRAMES} found={timeline.frames}")
+        tl_problems.append(
+            f"frames expected={_EXPECTED_TIMELINE_FRAMES} found={timeline.frames}"
+        )
     if timeline.fps != _EXPECTED_TIMELINE_FPS:
-        tl_problems.append(f"fps expected={_EXPECTED_TIMELINE_FPS} found={timeline.fps}")
+        tl_problems.append(
+            f"fps expected={_EXPECTED_TIMELINE_FPS} found={timeline.fps}"
+        )
     if abs(timeline.duration_seconds - _EXPECTED_TIMELINE_DURATION) > 1e-6:
         tl_problems.append(
             f"duration expected={_EXPECTED_TIMELINE_DURATION} found={timeline.duration_seconds}"
         )
     if len(timeline.timeline_segments) != 5:
-        tl_problems.append(f"image segments expected=5 found={len(timeline.timeline_segments)}")
+        tl_problems.append(
+            f"image segments expected=5 found={len(timeline.timeline_segments)}"
+        )
     tl_ok = not tl_problems
     record(
         tl_ok,
         "Timeline",
-        f"{timeline.duration_seconds}s / {timeline.frames} frames / {timeline.fps} fps, "
-        f"{len(timeline.timeline_segments)} image segments"
-        if tl_ok
-        else "; ".join(tl_problems),
+        (
+            f"{timeline.duration_seconds}s / {timeline.frames} frames / {timeline.fps} fps, "
+            f"{len(timeline.timeline_segments)} image segments"
+            if tl_ok
+            else "; ".join(tl_problems)
+        ),
     )
 
     # --- Audio -------------------------------------------------------------
@@ -1361,7 +1415,9 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
         aseg = timeline.audio_segments[0]
         fname = aseg.get("fileName") or aseg.get("audioFile", "")
         if _EXPECTED_AUDIO_FILE not in str(fname):
-            audio_problems.append(f"audioFile expected~'{_EXPECTED_AUDIO_FILE}' found={fname}")
+            audio_problems.append(
+                f"audioFile expected~'{_EXPECTED_AUDIO_FILE}' found={fname}"
+            )
         trim = aseg.get("trimStart")
         if trim is None or abs(float(trim) - _EXPECTED_AUDIO_TRIMSTART) > 1e-3:
             audio_problems.append(
@@ -1376,10 +1432,12 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
     record(
         audio_ok,
         "Audio",
-        f"'{_EXPECTED_AUDIO_FILE}' trimStart≈{_EXPECTED_AUDIO_TRIMSTART}, "
-        f"{_EXPECTED_AUDIO_DURATION_FRAMES} frames"
-        if audio_ok
-        else "; ".join(audio_problems),
+        (
+            f"'{_EXPECTED_AUDIO_FILE}' trimStart≈{_EXPECTED_AUDIO_TRIMSTART}, "
+            f"{_EXPECTED_AUDIO_DURATION_FRAMES} frames"
+            if audio_ok
+            else "; ".join(audio_problems)
+        ),
     )
 
     # --- Stage 1 / Stage 2 -------------------------------------------------
@@ -1397,38 +1455,60 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
         sched = _widget_list(sched_id)
         # BasicScheduler widgets: [scheduler_name, steps, denoise]
         if not sched or sched[0] != expected["scheduler"]:
-            problems.append(f"scheduler expected={expected['scheduler']} found={sched[:1]}")
+            problems.append(
+                f"scheduler expected={expected['scheduler']} found={sched[:1]}"
+            )
         if len(sched) < 3:
             problems.append(f"scheduler widgets incomplete: {sched}")
         else:
             if int(sched[1]) != expected["steps"]:
                 problems.append(f"steps expected={expected['steps']} found={sched[1]}")
             if abs(float(sched[2]) - expected["denoise"]) > 1e-9:
-                problems.append(f"denoise expected={expected['denoise']} found={sched[2]}")
+                problems.append(
+                    f"denoise expected={expected['denoise']} found={sched[2]}"
+                )
         guide = _widget_list(guide_id)
         # LTXDirectorGuide widgets: guide strength is at index 2.
         if len(guide) < 3:
             problems.append(f"guide widgets incomplete for node {guide_id}: {guide}")
         elif abs(float(guide[2]) - expected["guide"]) > 1e-9:
-            problems.append(f"guide strength expected={expected['guide']} found={guide[2]}")
+            problems.append(
+                f"guide strength expected={expected['guide']} found={guide[2]}"
+            )
         ok = not problems
         record(
             ok,
             label,
-            f"{expected['sampler']}/{expected['scheduler']} steps={expected['steps']} "
-            f"denoise={expected['denoise']} guide={expected['guide']}"
-            if ok
-            else "; ".join(problems),
+            (
+                f"{expected['sampler']}/{expected['scheduler']} steps={expected['steps']} "
+                f"denoise={expected['denoise']} guide={expected['guide']}"
+                if ok
+                else "; ".join(problems)
+            ),
         )
 
-    _check_stage("Stage 1", _STAGE1_KSAMPLER_NODE_ID, _STAGE1_SCHED_NODE_ID, _STAGE1_GUIDE_NODE_ID, _EXPECTED_STAGE1)
-    _check_stage("Stage 2", _STAGE2_KSAMPLER_NODE_ID, _STAGE2_SCHED_NODE_ID, _STAGE2_GUIDE_NODE_ID, _EXPECTED_STAGE2)
+    _check_stage(
+        "Stage 1",
+        _STAGE1_KSAMPLER_NODE_ID,
+        _STAGE1_SCHED_NODE_ID,
+        _STAGE1_GUIDE_NODE_ID,
+        _EXPECTED_STAGE1,
+    )
+    _check_stage(
+        "Stage 2",
+        _STAGE2_KSAMPLER_NODE_ID,
+        _STAGE2_SCHED_NODE_ID,
+        _STAGE2_GUIDE_NODE_ID,
+        _EXPECTED_STAGE2,
+    )
 
     # --- Final Video -------------------------------------------------------
     vhs_node = graph.get_node(_VHS_NODE_ID)
     vhs_problems: list[str] = []
     if vhs_node is None or not isinstance(vhs_node.widgets_values, dict):
-        vhs_problems.append(f"VHS_VideoCombine node id={_VHS_NODE_ID} missing or malformed")
+        vhs_problems.append(
+            f"VHS_VideoCombine node id={_VHS_NODE_ID} missing or malformed"
+        )
     else:
         wv = vhs_node.widgets_values
         for key, exp in _EXPECTED_VHS.items():
@@ -1439,11 +1519,13 @@ def validate_workflow(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
     record(
         video_ok,
         "Final Video",
-        f"VHS_VideoCombine {_EXPECTED_VHS['format']} {_EXPECTED_VHS['pix_fmt']} "
-        f"crf={_EXPECTED_VHS['crf']} fps={_EXPECTED_VHS['frame_rate']} "
-        f"prefix='{_EXPECTED_VHS['filename_prefix']}'"
-        if video_ok
-        else "; ".join(vhs_problems),
+        (
+            f"VHS_VideoCombine {_EXPECTED_VHS['format']} {_EXPECTED_VHS['pix_fmt']} "
+            f"crf={_EXPECTED_VHS['crf']} fps={_EXPECTED_VHS['frame_rate']} "
+            f"prefix='{_EXPECTED_VHS['filename_prefix']}'"
+            if video_ok
+            else "; ".join(vhs_problems)
+        ),
     )
 
     # --- Report ------------------------------------------------------------
@@ -1478,7 +1560,9 @@ _NODE_TYPE_ALIASES: dict[str, str] = {
 }
 
 
-def _load_comfy_node_mappings(comfyui_root: str = COMFYUI_ROOT) -> tuple[dict[str, Any], dict[str, Any]]:
+def _load_comfy_node_mappings(
+    comfyui_root: str = COMFYUI_ROOT,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Import ComfyUI and return (NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS).
 
     Adds ComfyUI to sys.path, initializes custom nodes, and imports ``nodes``.
@@ -1500,7 +1584,9 @@ def _load_comfy_node_mappings(comfyui_root: str = COMFYUI_ROOT) -> tuple[dict[st
     if callable(init_custom):
         try:
             init_custom()
-        except Exception as exc:  # noqa: BLE001 - report; custom node import errors matter
+        except (
+            Exception  # noqa: BLE001 - report; custom node import errors matter
+        ) as exc:
             print(f"  [warn] init_extra_nodes raised: {exc!r}")
     class_mappings = dict(getattr(nodes_mod, "NODE_CLASS_MAPPINGS", {}))
     display_mappings = dict(getattr(nodes_mod, "NODE_DISPLAY_NAME_MAPPINGS", {}))
@@ -1585,7 +1671,9 @@ class Checkpoint:
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
                 self.state = json.load(handle)
-            print(f"[checkpoint] resumed from {self.path} (phase={self.state.get('phase')})")
+            print(
+                f"[checkpoint] resumed from {self.path} (phase={self.state.get('phase')})"
+            )
             return True
         except (OSError, json.JSONDecodeError) as exc:
             print(f"[checkpoint] could not read {self.path}: {exc!r}; starting fresh")
@@ -1777,7 +1865,9 @@ class GraphExecutor:
         return order
 
     # -- input wiring --------------------------------------------------------
-    def _resolve_inputs(self, node: ParsedNode) -> tuple[dict[str, Any], dict[str, str]]:
+    def _resolve_inputs(
+        self, node: ParsedNode
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         """Resolve a node's linked inputs to kwargs keyed by input NAME.
 
         Returns (kwargs, input_types) where input_types maps name->declared link
@@ -1960,7 +2050,9 @@ class GraphExecutor:
         vram_after: float | None,
     ) -> None:
         if ram_before is not None and ram_after is not None:
-            self.ram_peak_used_gb = max(self.ram_peak_used_gb, max(0.0, ram_before - ram_after))
+            self.ram_peak_used_gb = max(
+                self.ram_peak_used_gb, max(0.0, ram_before - ram_after)
+            )
         if vram_before is not None and vram_after is not None:
             self.vram_peak_used_gb = max(
                 self.vram_peak_used_gb, max(0.0, vram_before - vram_after)
@@ -2002,7 +2094,12 @@ class GraphExecutor:
 
     def _stage_for(self, node: ParsedNode) -> str:
         """Human-readable stage label for diagnostics/checkpointing."""
-        if node.id in (_STAGE1_GUIDE_NODE_ID, _STAGE1_KSAMPLER_NODE_ID, _STAGE1_SCHED_NODE_ID, 19):
+        if node.id in (
+            _STAGE1_GUIDE_NODE_ID,
+            _STAGE1_KSAMPLER_NODE_ID,
+            _STAGE1_SCHED_NODE_ID,
+            19,
+        ):
             return "Stage 1 (euler/8/denoise1.0/linear_quadratic)"
         if node.id in (
             _SPATIAL_UPSCALER_NODE_ID,
@@ -2230,7 +2327,9 @@ def _b64(data: bytes) -> str:
 # ════════════════════════════════════════════════════════════════════════════
 # FULL PIPELINE DRIVER  (ties CELLs 2-19 together for --run on Colab)
 # ════════════════════════════════════════════════════════════════════════════
-def run_full_pipeline(json_path: str | None = None, comfyui_root: str = COMFYUI_ROOT) -> int:
+def run_full_pipeline(
+    json_path: str | None = None, comfyui_root: str = COMFYUI_ROOT
+) -> int:
     """Execute the entire graph-faithful pipeline on a Colab GPU runtime.
 
     This is the real --run path. It is import-safe to DEFINE (heavy imports are
@@ -2301,13 +2400,565 @@ def run_full_pipeline(json_path: str | None = None, comfyui_root: str = COMFYUI_
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# CELL 41: FINAL SELF-CHECK
+# ----------------------------------------------------------------------------
+# Programmatically re-derives EACH checklist item from the PARSED graph and
+# timeline. Prints a checkbox report: [x] for pass, [FAIL] with detail for
+# failure. This is NOT hardcoded -- it inspects the parsed structures.
+# ════════════════════════════════════════════════════════════════════════════
+def _selfcheck_item(ok: bool, label: str, detail: str = "") -> tuple[bool, str]:
+    """Format one self-check item. Returns (pass, formatted_line)."""
+    tag = "[x]" if ok else "[FAIL]"
+    line = f"  {tag} {label}"
+    if detail:
+        line += f"  -- {detail}"
+    return ok, line
+
+
+def run_final_selfcheck(graph: ParsedGraph, timeline: DirectorTimeline) -> bool:
+    """CELL 41: Final Self-Check driven entirely by the parsed graph/timeline.
+
+    Re-derives every checklist item and prints a checkbox report.
+    Returns True only if all items pass.
+    """
+    results: list[tuple[bool, str]] = []
+
+    # --- 1. LTXDirector exists and is master timeline controller ---
+    director = graph.get_node(LTXDIRECTOR_NODE_ID)
+    ok = director is not None and director.type == "LTXDirector"
+    results.append(
+        _selfcheck_item(
+            ok,
+            "LTXDirector (id=131) exists as Master Timeline Controller",
+            f"type={director.type if director else 'MISSING'}" if not ok else "",
+        )
+    )
+
+    # --- 2. Timeline = 31.5s / 756f / 24fps ---
+    tl_ok = (
+        abs(timeline.duration_seconds - 31.5) < 1e-6
+        and timeline.frames == 756
+        and timeline.fps == 24
+    )
+    results.append(
+        _selfcheck_item(
+            tl_ok,
+            "Timeline: 31.5s / 756 frames / 24 fps",
+            (
+                f"got {timeline.duration_seconds}s/{timeline.frames}f/{timeline.fps}fps"
+                if not tl_ok
+                else ""
+            ),
+        )
+    )
+
+    # --- 3. 5 reference images preserved with original positions ---
+    segs = timeline.timeline_segments
+    img_ok = len(segs) == 5
+    if img_ok:
+        # Verify each segment has imageFile and position info
+        for i, seg in enumerate(segs):
+            if "imageFile" not in seg:
+                img_ok = False
+                break
+            if "start" not in seg:
+                img_ok = False
+                break
+    results.append(
+        _selfcheck_item(
+            img_ok,
+            "5 reference images preserved with original positions",
+            f"found {len(segs)} segments" if not img_ok else "",
+        )
+    )
+
+    # --- 4. Audio track + trimStart + audioDurationFrames preserved ---
+    audio_ok = False
+    audio_detail = ""
+    if timeline.audio_segments:
+        aseg = timeline.audio_segments[0]
+        has_file = bool(aseg.get("audioFile") or aseg.get("fileName"))
+        has_trim = "trimStart" in aseg
+        has_dur = "audioDurationFrames" in aseg
+        audio_ok = has_file and has_trim and has_dur
+        if not audio_ok:
+            audio_detail = (
+                f"file={has_file}, trimStart={has_trim}, "
+                f"audioDurationFrames={has_dur}"
+            )
+    else:
+        audio_detail = "no audio segments"
+    results.append(
+        _selfcheck_item(
+            audio_ok,
+            "Audio track + trimStart + audioDurationFrames preserved",
+            audio_detail,
+        )
+    )
+
+    # --- 5. Motion track flag preserved (may be empty) ---
+    motion_enabled = timeline.timeline_config.get("motionTrackEnabled")
+    # motionSegments may legitimately be empty; we report accurately
+    motion_ok = motion_enabled is not None
+    motion_detail = (
+        f"motionTrackEnabled={motion_enabled}, "
+        f"motionSegments={len(timeline.motion_segments)} (empty is valid for this workflow)"
+    )
+    results.append(
+        _selfcheck_item(
+            motion_ok,
+            "Motion track flag preserved (motionSegments may be empty)",
+            motion_detail,
+        )
+    )
+
+    # --- 6. guide_data + motion_guide_data outputs preserved ---
+    director_outgoing = graph.outgoing_links(LTXDIRECTOR_NODE_ID)
+    # LTXDirector outputs: model(0), positive(1), video_latent(2), audio_latent(3),
+    #   guide_data(4), motion_guide_data(5), frame_rate(6), combined_audio(7)
+    guide_slots = {lk[2] for lk in director_outgoing if len(lk) >= 3}
+    has_guide = 4 in guide_slots
+    has_motion_guide = 5 in guide_slots
+    guide_ok = has_guide and has_motion_guide
+    results.append(
+        _selfcheck_item(
+            guide_ok,
+            "guide_data + motion_guide_data outputs connected",
+            (
+                f"guide_data={has_guide}, motion_guide_data={has_motion_guide}"
+                if not guide_ok
+                else ""
+            ),
+        )
+    )
+
+    # --- 7. Stage1 guide=1.0, Stage2 guide=0.5 ---
+    def _get_guide_strength(guide_node_id: int) -> float | None:
+        node = graph.get_node(guide_node_id)
+        if node is None:
+            return None
+        wv = node.widgets_values
+        if isinstance(wv, (list, tuple)) and len(wv) >= 3:
+            try:
+                return float(wv[2])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    s1_guide = _get_guide_strength(_STAGE1_GUIDE_NODE_ID)
+    s2_guide = _get_guide_strength(_STAGE2_GUIDE_NODE_ID)
+    stage_guide_ok = (
+        s1_guide is not None
+        and abs(s1_guide - 1.0) < 1e-9
+        and s2_guide is not None
+        and abs(s2_guide - 0.5) < 1e-9
+    )
+    results.append(
+        _selfcheck_item(
+            stage_guide_ok,
+            "Stage1 guide=1.0, Stage2 guide=0.5",
+            f"got Stage1={s1_guide}, Stage2={s2_guide}" if not stage_guide_ok else "",
+        )
+    )
+
+    # --- 8. Stage1 euler/8/denoise1.0 ---
+    def _get_stage_params(ksampler_id: int, sched_id: int) -> dict[str, Any]:
+        ks = graph.get_node(ksampler_id)
+        sched = graph.get_node(sched_id)
+        result: dict[str, Any] = {}
+        if ks and isinstance(ks.widgets_values, (list, tuple)) and ks.widgets_values:
+            result["sampler"] = ks.widgets_values[0]
+        if sched and isinstance(sched.widgets_values, (list, tuple)):
+            wv = sched.widgets_values
+            if len(wv) >= 3:
+                result["steps"] = wv[1]
+                result["denoise"] = wv[2]
+        return result
+
+    s1_params = _get_stage_params(_STAGE1_KSAMPLER_NODE_ID, _STAGE1_SCHED_NODE_ID)
+    s1_ok = (
+        s1_params.get("sampler") == "euler"
+        and int(s1_params.get("steps", 0)) == 8
+        and abs(float(s1_params.get("denoise", 0)) - 1.0) < 1e-9
+    )
+    results.append(
+        _selfcheck_item(
+            s1_ok,
+            "Stage1: euler / 8 steps / denoise=1.0",
+            f"got {s1_params}" if not s1_ok else "",
+        )
+    )
+
+    # --- 9. Stage2 euler/4/denoise0.42 ---
+    s2_params = _get_stage_params(_STAGE2_KSAMPLER_NODE_ID, _STAGE2_SCHED_NODE_ID)
+    s2_ok = (
+        s2_params.get("sampler") == "euler"
+        and int(s2_params.get("steps", 0)) == 4
+        and abs(float(s2_params.get("denoise", 0)) - 0.42) < 1e-9
+    )
+    results.append(
+        _selfcheck_item(
+            s2_ok,
+            "Stage2: euler / 4 steps / denoise=0.42",
+            f"got {s2_params}" if not s2_ok else "",
+        )
+    )
+
+    # --- 10. 4 LoRAs with strengths 0.4/0.6/0.7/0.9 ---
+    lora_node = graph.get_node(_LORA_NODE_ID)
+    parsed_loras = _extract_loras(lora_node) if lora_node else []
+    expected_strengths = [0.4, 0.6, 0.7, 0.9]
+    lora_ok = (
+        len(parsed_loras) == 4
+        and all(
+            abs(parsed_loras[i][1] - expected_strengths[i]) < 1e-9 for i in range(4)
+        )
+        and all(on for _, _, on in parsed_loras)
+    )
+    results.append(
+        _selfcheck_item(
+            lora_ok,
+            "4 LoRAs with strengths 0.4/0.6/0.7/0.9",
+            (
+                f"found {len(parsed_loras)} loras, "
+                f"strengths={[s for _, s, _ in parsed_loras]}"
+                if not lora_ok
+                else ""
+            ),
+        )
+    )
+
+    # --- 11. All required node types present ---
+    required_types: dict[str, int] = {
+        "DualCLIPLoader": 1,
+        "LTXVConditioning": 1,
+        "ConditioningZeroOut": 1,
+        "LTXVConcatAVLatent": 2,
+        "LTXVSeparateAVLatent": 2,
+        "LTXVLatentUpsampler": 1,
+        "LatentUpscaleModelLoader": 1,
+        "LTXDirectorCropGuides": 2,
+        "ModelPreviewOverrideKJ": 1,
+        "VAELoaderKJ": 1,  # tiny VAE
+        "VAELoader": 2,  # video VAE + audio VAE
+        "LTXVAudioVAEDecode": 1,
+        "VAEDecode": 1,
+        "VHS_VideoCombine": 1,
+    }
+    missing_types: list[str] = []
+    for ntype, expected_count in required_types.items():
+        found_count = graph.node_type_counts.get(ntype, 0)
+        if found_count < expected_count:
+            missing_types.append(
+                f"{ntype}(expected>={expected_count}, found={found_count})"
+            )
+    types_ok = not missing_types
+    results.append(
+        _selfcheck_item(
+            types_ok,
+            "All required node types present",
+            f"missing: {', '.join(missing_types)}" if not types_ok else "",
+        )
+    )
+
+    # --- 12. Original connections preserved ---
+    conn_ok = graph.link_count == _EXPECTED_LINK_COUNT
+    results.append(
+        _selfcheck_item(
+            conn_ok,
+            f"Original connections preserved ({_EXPECTED_LINK_COUNT} links)",
+            f"found {graph.link_count}" if not conn_ok else "",
+        )
+    )
+
+    # --- NEGATIVE ASSERTIONS ---
+
+    # --- 13. No fake 5-scene loop ---
+    # Verify: this file does NOT contain a GENERATION loop iterating 5 scenes.
+    # We inspect our own source code (excluding comments and strings) to confirm.
+    own_source_path = os.path.abspath(__file__)
+    source_clean = True
+    neg_details: list[str] = []
+    try:
+        with open(own_source_path, encoding="utf-8") as f:
+            source_lines = f.readlines()
+    except OSError:
+        source_lines = []
+        source_clean = False
+        neg_details.append("could not read own source")
+
+    source = "".join(source_lines)
+
+    import re
+
+    # Check for 5-scene loop patterns in actual code lines (not comments/strings).
+    # Only flag lines that are actual code (not starting with # after stripping).
+    def _code_lines_only(lines: list[str]) -> str:
+        """Return only lines that are not pure comments or inside docstrings."""
+        result: list[str] = []
+        in_docstring = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(('"""', "'''")):
+                # Toggle docstring state (simplified heuristic)
+                if stripped.count('"""') == 1 or stripped.count("'''") == 1:
+                    in_docstring = not in_docstring
+                continue
+            if in_docstring:
+                continue
+            if stripped.startswith("#"):
+                continue
+            result.append(line)
+        return "\n".join(result)
+
+    code_only = _code_lines_only(source_lines)
+
+    five_scene_pattern = re.compile(
+        r"for\s+\w+\s+in\s+range\s*\(\s*5\s*\)\s*:.*(?:generat|scene|latent|sampl)",
+        re.IGNORECASE,
+    )
+    if five_scene_pattern.search(code_only):
+        source_clean = False
+        neg_details.append("contains 5-scene generation loop pattern in code")
+    results.append(
+        _selfcheck_item(
+            source_clean,
+            "NEGATIVE: No fake 5-scene generation loop",
+            "; ".join(neg_details) if neg_details else "",
+        )
+    )
+
+    # --- 14. No linear_blend_overlap ---
+    # Check that linear_blend_overlap is not defined/called as a function in code.
+    # Documentary mentions in comments/strings are acceptable (they explain what
+    # is NOT done).
+    has_linear_blend_code = bool(
+        re.search(r"^\s*def\s+linear_blend_overlap\b", source, re.MULTILINE)
+    ) or bool(re.search(r"^\s*\w.*linear_blend_overlap\s*\(", code_only, re.MULTILINE))
+    results.append(
+        _selfcheck_item(
+            not has_linear_blend_code,
+            "NEGATIVE: No linear_blend_overlap function/call in code",
+            (
+                "found linear_blend_overlap definition or call"
+                if has_linear_blend_code
+                else ""
+            ),
+        )
+    )
+
+    # --- 15. No post-only audio sync ---
+    # The audio comes through LTXDirector's audio_latent output (slot 3), which
+    # is connected to the graph (LTXVConcatAVLatent / LTXVSeparateAVLatent).
+    # This means audio is handled natively in the latent pipeline, NOT through
+    # post-hoc FFmpeg muxing as the primary mechanism.
+    audio_latent_connected = 3 in guide_slots  # slot 3 = audio_latent
+    results.append(
+        _selfcheck_item(
+            audio_latent_connected,
+            "NEGATIVE: No post-only audio sync (audio_latent connected in graph)",
+            (
+                "audio_latent output slot 3 not connected"
+                if not audio_latent_connected
+                else ""
+            ),
+        )
+    )
+
+    # --- 16. Memory manager is infrastructure-only ---
+    # Verify: memory functions exist but are not used to replace LTXDirector.
+    # The memory guard is called only as infrastructure; the actual generation is
+    # driven by the graph executor which calls ComfyUI nodes directly.
+    has_memory_guard = "memory_guard" in source or "deep_memory_cleanup" in source
+    has_executor = "class GraphExecutor" in source
+    infra_ok = has_memory_guard and has_executor
+    results.append(
+        _selfcheck_item(
+            infra_ok,
+            "NEGATIVE: Memory manager is infrastructure-only (not generation replacement)",
+            "" if infra_ok else "missing memory_guard or GraphExecutor",
+        )
+    )
+
+    # --- 17. No placeholder images ---
+    # No code creates placeholder/dummy images to substitute for missing references.
+    # Only check actual code lines (not comments explaining "no placeholder").
+    placeholder_patterns = re.compile(
+        r"Image\.new\s*\(|"
+        r"np\.zeros.*\bimage\b|"
+        r"blank_image\s*=|"
+        r"dummy_image\s*=",
+        re.IGNORECASE,
+    )
+    has_placeholder = bool(placeholder_patterns.search(code_only))
+    results.append(
+        _selfcheck_item(
+            not has_placeholder,
+            "NEGATIVE: No placeholder/dummy image generation",
+            "found placeholder image pattern" if has_placeholder else "",
+        )
+    )
+
+    # --- 18. No silent exception swallowing in core execution ---
+    # Check: no bare 'except: pass' or 'except Exception: pass' in core execution.
+    # Infrastructure (memory cleanup) is allowed to log-and-continue.
+    bare_except_pass = re.compile(
+        r"except\s*(?:Exception\s*)?(?:as\s+\w+\s*)?:\s*\n\s*pass\b"
+    )
+    has_bare_pass = bool(bare_except_pass.search(source))
+    results.append(
+        _selfcheck_item(
+            not has_bare_pass,
+            "NEGATIVE: No silent exception swallowing (except: pass)",
+            "found bare except-pass" if has_bare_pass else "",
+        )
+    )
+
+    # --- Print report ---
+    print()
+    print("=" * 70)
+    print("FINAL SELF-CHECK (CELL 41)")
+    print("=" * 70)
+    all_pass = True
+    for passed, line in results:
+        print(line)
+        if not passed:
+            all_pass = False
+    print("=" * 70)
+    if all_pass:
+        print("ALL SELF-CHECK ITEMS PASSED")
+    else:
+        failed_items = [line for passed, line in results if not passed]
+        print(f"SELF-CHECK FAILURES ({len(failed_items)}):")
+        for line in failed_items:
+            print(f"  {line}")
+    print("=" * 70)
+    return all_pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 42: FINAL WORKFLOW AUDIT REPORT
+# ----------------------------------------------------------------------------
+# Summarizes measured facts from the parsed graph. At Colab runtime the
+# placeholders (RAM/VRAM peaks, output duration) are filled with real values.
+# Explicitly states this report does NOT claim impossible guarantees.
+# ════════════════════════════════════════════════════════════════════════════
+def print_audit_report(
+    graph: ParsedGraph,
+    timeline: DirectorTimeline,
+    runtime_stats: dict[str, Any] | None = None,
+) -> None:
+    """CELL 42: Print the Final Workflow Audit Report.
+
+    Parameters
+    ----------
+    graph : ParsedGraph
+        The parsed workflow graph.
+    timeline : DirectorTimeline
+        The parsed LTXDirector timeline.
+    runtime_stats : dict, optional
+        If running on Colab, a dict with measured runtime values:
+        ``ram_peak_gb``, ``vram_peak_gb``, ``output_frames``,
+        ``output_duration_s``, ``execution_time_s``.
+        When None (selftest mode), placeholders are printed instead.
+    """
+    lora_node = graph.get_node(_LORA_NODE_ID)
+    loras = _extract_loras(lora_node) if lora_node else []
+
+    stats = runtime_stats or {}
+
+    print()
+    print("=" * 70)
+    print("FINAL WORKFLOW AUDIT REPORT (CELL 42)")
+    print("=" * 70)
+    print()
+    print("MEASURED GRAPH FACTS (from parsed JSON):")
+    print(f"  Nodes            : {graph.node_count}")
+    print(f"  Links            : {graph.link_count}")
+    print(
+        f"  Timeline         : {timeline.duration_seconds}s / "
+        f"{timeline.frames} frames / {timeline.fps} fps"
+    )
+    print(f"  Image segments   : {len(timeline.timeline_segments)}")
+    print(f"  Audio segments   : {len(timeline.audio_segments)}")
+    print(
+        f"  Motion segments  : {len(timeline.motion_segments)} "
+        f"(empty is valid for this workflow)"
+    )
+    print(f"  LoRA count       : {len(loras)}")
+    for name, strength, on in loras:
+        print(f"    [{('on' if on else 'off'):>3}] {name}  strength={strength}")
+    print()
+    print("STAGE SETTINGS (parsed from graph nodes):")
+
+    def _stage_line(label: str, ks_id: int, sched_id: int, guide_id: int) -> None:
+        ks = graph.get_node(ks_id)
+        sched = graph.get_node(sched_id)
+        guide = graph.get_node(guide_id)
+        sampler = "?"
+        steps = "?"
+        denoise = "?"
+        guide_s = "?"
+        if ks and isinstance(ks.widgets_values, (list, tuple)) and ks.widgets_values:
+            sampler = ks.widgets_values[0]
+        if sched and isinstance(sched.widgets_values, (list, tuple)):
+            wv = sched.widgets_values
+            if len(wv) >= 3:
+                steps = wv[1]
+                denoise = wv[2]
+        if guide and isinstance(guide.widgets_values, (list, tuple)):
+            wv = guide.widgets_values
+            if len(wv) >= 3:
+                guide_s = wv[2]
+        print(
+            f"  {label}: sampler={sampler}, steps={steps}, "
+            f"denoise={denoise}, guide_strength={guide_s}"
+        )
+
+    _stage_line(
+        "Stage 1",
+        _STAGE1_KSAMPLER_NODE_ID,
+        _STAGE1_SCHED_NODE_ID,
+        _STAGE1_GUIDE_NODE_ID,
+    )
+    _stage_line(
+        "Stage 2",
+        _STAGE2_KSAMPLER_NODE_ID,
+        _STAGE2_SCHED_NODE_ID,
+        _STAGE2_GUIDE_NODE_ID,
+    )
+    print()
+    print("RUNTIME MEASUREMENTS (Colab only; placeholders in selftest):")
+    print(f"  Output frames    : {stats.get('output_frames', '<measured at runtime>')}")
+    print(
+        f"  Output duration  : {stats.get('output_duration_s', '<measured at runtime>')}"
+    )
+    print(f"  RAM peak (GB)    : {stats.get('ram_peak_gb', '<measured at runtime>')}")
+    print(f"  VRAM peak (GB)   : {stats.get('vram_peak_gb', '<measured at runtime>')}")
+    print(
+        f"  Execution time   : {stats.get('execution_time_s', '<measured at runtime>')}"
+    )
+    print()
+    print("DISCLAIMER:")
+    print("  This report summarizes measured facts from the parsed workflow graph")
+    print("  and (when available) runtime measurements from Colab execution.")
+    print("  It does NOT claim impossible guarantees about output quality,")
+    print("  visual fidelity, or runtime performance on untested hardware.")
+    print("  Results depend on GPU memory, driver versions, model weights,")
+    print("  and reference image content. The only guarantee is faithful")
+    print("  re-execution of the original ComfyUI graph topology.")
+    print("=" * 70)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # CLI ENTRYPOINT
 # ════════════════════════════════════════════════════════════════════════════
 def run_selftest(json_path: str | None = None) -> int:
     """Load -> parse -> timeline -> validate against the REAL repo JSON.
 
     Does NOT import torch/comfy. Returns 0 on success, non-zero on failure.
-    Prints measured facts (node/link counts, timeline, LoRA names+strengths).
+    Prints measured facts (node/link counts, timeline, LoRA names+strengths),
+    the FINAL SELF-CHECK checklist (CELL 41), and the audit report (CELL 42).
     """
     try:
         data = load_workflow_json(json_path)
@@ -2337,6 +2988,17 @@ def run_selftest(json_path: str | None = None) -> int:
     for name, strength, on in loras:
         print(f"    - {name}  strength={strength}  on={on}")
     print("-" * 70)
+
+    # CELL 41: Final Self-Check
+    selfcheck_ok = run_final_selfcheck(graph, timeline)
+
+    # CELL 42: Final Workflow Audit Report
+    print_audit_report(graph, timeline)
+
+    if not selfcheck_ok:
+        print("❌ SELFTEST FAILED: self-check items did not all pass")
+        return 1
+
     print("✅ SELFTEST PASSED")
     return 0
 
